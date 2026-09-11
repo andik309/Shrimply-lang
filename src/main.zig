@@ -1,0 +1,55 @@
+const std = @import("std");
+const shpl = @import("shpl");
+
+pub fn main(init: std.process.Init) !void {
+    //test 1
+
+    errdefer |err| if (err == std.mem.Allocator.Error.OutOfMemory) std.debug.print("buy more ram lol\n", .{});
+
+    const code =
+    // \\ .,:;
+    // \\
+    // \\ ({[)}]
+    // \\
+    // \\ += -= *= /= %=
+    // \\ // |= &= ^=
+    // \\ <<= >>=
+    // \\ ||= &&= ^^=
+    // \\ + - * / %
+    // \\ | & ^
+    // \\ << >>
+    // \\ || && ^^
+    // \\ == !=
+    // \\ <= >=
+    // \\ < >
+    // \\ .* .? .!
+    // \\ ~ !
+    // \\ =
+    // \\
+    // \\ let muu #inline @as @"let" "str" 'char' 52
+    // \\ 67+67+677+677 == 1488
+
+    \\let muu = func() void {};
+    \\
+    \\let @"main" = func() void {
+    \\    let muu = 0;
+    \\    muu = 6;
+    \\};
+    ;
+
+    const file_tokens = try shpl.lexer.lexFile(code, "<unknown>", init.gpa, false);
+    defer init.gpa.free(file_tokens);
+
+    const file_node, var arena = try shpl.parser.parseFile(code, file_tokens, "<unknown>", init.gpa);
+    defer _ = arena.reset(.free_all);
+
+    const file_ir = try shpl.lowerer.lowerFile(file_node, init.gpa);
+    defer {
+        for (file_ir) |instruction| instruction.deinit(init.gpa);
+        init.gpa.free(file_ir);
+    }
+
+    for (file_ir, 0..) |instruction, i| {
+        std.debug.print("{:0>4} : {any}\n", .{ i, instruction });
+    }
+}

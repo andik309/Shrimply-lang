@@ -1,0 +1,8 @@
+.{
+    .name = .Shrimply,
+    .version = "0.0.0",
+    .fingerprint = 0xa9363a856821a906,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{ "" },
+}
