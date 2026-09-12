@@ -3,7 +3,7 @@ const std = @import("std");
 const Span = @import("utils.zig").Span;
 
 pub const Instruction = union(enum) {
-
+    get: Get,
     int: Int,
 
     struct_def: StructDef,
@@ -18,7 +18,7 @@ pub const Instruction = union(enum) {
 
     // macro_inline: MacroInline,
     // inlined_decl: InlinedDecl,
-    
+
     pub const Get = struct {
         identifier: []const u8,
     };
@@ -65,7 +65,7 @@ pub const Instruction = union(enum) {
     };
 
     // pub fn clone(self: Instruction, allocator: std.mem.Allocator) Instruction {}
-    
+
     pub fn deinit(self: Instruction, allocator: std.mem.Allocator) void {
         switch (self) {
             .get => |d| {
@@ -74,7 +74,7 @@ pub const Instruction = union(enum) {
             .int => |d| {
                 allocator.free(d.content);
             },
-        
+
             .struct_def => |d| {
                 for (d.fields) |field| allocator.free(field.name);
                 allocator.free(d.fields);
@@ -85,18 +85,18 @@ pub const Instruction = union(enum) {
                 for (d.params) |param| allocator.free(param.name);
                 allocator.free(d.params);
             },
-        
+
             .decl => |d| {
                 allocator.free(d.name);
             },
             .assign => |d| {
                 _ = d;
             },
-        
+
             .block => |d| {
                 _ = d;
             },
-        
+
             .copy => |d| {
                 _ = d;
             },
@@ -130,7 +130,7 @@ pub const Lowerer = struct {
 
             .decl => |d| {
                 var result: Instruction.Decl = undefined;
-                
+
                 value_pos = self.instructions.items.len;
                 try self.instructions.append(self.gpa, undefined);
 
@@ -144,7 +144,7 @@ pub const Lowerer = struct {
                 var result: Instruction.Assign = undefined;
 
                 result.target = try self.lowerPre(d.target);
-                
+
                 value_pos = self.instructions.items.len;
                 try self.instructions.append(self.gpa, undefined);
 
@@ -156,10 +156,10 @@ pub const Lowerer = struct {
 
             .block => |d| {
                 var result: Instruction.Block = undefined;
-                
+
                 value_pos = self.instructions.items.len;
                 try self.instructions.append(self.gpa, undefined);
-                
+
                 result.body.start = self.instructions.items.len;
                 for (d.body) |*inner_node| _ = try self.lowerPre(inner_node);
                 result.body.end = self.instructions.items.len;
@@ -170,7 +170,7 @@ pub const Lowerer = struct {
             .field => unreachable,
             .struct_def => |d| {
                 if (d.fields.len != 0) std.debug.panic("todo: implement field lowering", .{});
-                
+
                 var result: Instruction.StructDef = undefined;
 
                 value_pos = self.instructions.items.len;
@@ -189,7 +189,7 @@ pub const Lowerer = struct {
             },
             .func_def => |d| {
                 if (d.params.len != 0) std.debug.panic("todo: implement params lowering", .{});
-                
+
                 var result: Instruction.FuncDef = undefined;
 
                 value_pos = self.instructions.items.len;
@@ -203,7 +203,7 @@ pub const Lowerer = struct {
                 self.instructions.items[value_pos] = .{ .func_def = result };
             },
 
-            else => |_, tag| std.debug.panic("node {s} cant be lowered now, its not implemented", .{ @tagName(tag) }),
+            else => |_, tag| std.debug.panic("node {s} cant be lowered now, its not implemented", .{@tagName(tag)}),
         }
 
         return value_pos;

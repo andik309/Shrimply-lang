@@ -2,39 +2,37 @@ const std = @import("std");
 const shpl = @import("shpl");
 
 pub fn main(init: std.process.Init) !void {
-    //test 1
-
     errdefer |err| if (err == std.mem.Allocator.Error.OutOfMemory) std.debug.print("buy more ram lol\n", .{});
 
     const code =
-    // \\ .,:;
-    // \\
-    // \\ ({[)}]
-    // \\
-    // \\ += -= *= /= %=
-    // \\ // |= &= ^=
-    // \\ <<= >>=
-    // \\ ||= &&= ^^=
-    // \\ + - * / %
-    // \\ | & ^
-    // \\ << >>
-    // \\ || && ^^
-    // \\ == !=
-    // \\ <= >=
-    // \\ < >
-    // \\ .* .? .!
-    // \\ ~ !
-    // \\ =
-    // \\
-    // \\ let muu #inline @as @"let" "str" 'char' 52
-    // \\ 67+67+677+677 == 1488
+        // \\ .,:;
+        // \\
+        // \\ ({[)}]
+        // \\
+        // \\ += -= *= /= %=
+        // \\ // |= &= ^=
+        // \\ <<= >>=
+        // \\ ||= &&= ^^=
+        // \\ + - * / %
+        // \\ | & ^
+        // \\ << >>
+        // \\ || && ^^
+        // \\ == !=
+        // \\ <= >=
+        // \\ < >
+        // \\ .* .? .!
+        // \\ ~ !
+        // \\ =
+        // \\
+        // \\ let muu #inline @as @"let" "str" 'char' 52
+        // \\ 67+67+677+677 == 1488
 
-    \\let muu = func() void {};
-    \\
-    \\let @"main" = func() void {
-    \\    let muu = 0;
-    \\    muu = 6;
-    \\};
+        \\let muu = func() void {};
+        \\
+        \\let @"main" = func() void {
+        \\    let muu = 0;
+        \\    muu = 6;
+        \\};
     ;
 
     const file_tokens = try shpl.lexer.lexFile(code, "<unknown>", init.gpa, false);
@@ -52,4 +50,8 @@ pub fn main(init: std.process.Init) !void {
     for (file_ir, 0..) |instruction, i| {
         std.debug.print("{:0>4} : {any}\n", .{ i, instruction });
     }
+
+    const file_inlined_data = shpl.inliner.inlineFile();
+
+    _ = file_inlined_data;
 }
