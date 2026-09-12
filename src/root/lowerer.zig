@@ -3,7 +3,7 @@ const std = @import("std");
 const Span = @import("utils.zig").Span;
 
 pub const Instruction = union(enum) {
-    get: Get,
+
     int: Int,
 
     struct_def: StructDef,
