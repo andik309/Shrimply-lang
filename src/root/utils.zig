@@ -62,17 +62,32 @@ pub const Span = struct{
         return .{ .start = pos, .end = pos+1 };
     }
 
-    pub fn shift(self: *Span, value: usize, comptime direction: Direction) void {
-        const op = switch (direction) {
-            .forward => std.math.add, .backward => std.math.sub
-        };
+    pub fn shiftMut(self: *Span, value: usize, direction: Direction) void {
+        const op = direction.to_op();
 
-        self.start = op(usize, self.start, value) catch unreachable; // TODO: errors
-        self.end = op(usize, self.end, value) catch unreachable; // TODO: errors
+        self.start = op(self.start, value); 
+        self.end = op(self.end, value); 
     }
 };
 
-pub const Direction = enum { forward, backward };
+pub const Direction = enum { 
+    forward, backward,
+    
+    pub fn to_op(self: Direction) *const fn(usize, usize) usize {
+        return switch (self) {
+            .forward => &add,
+            .backward => &sub,
+        };
+    }
+
+    fn add(lhs: usize, rhs: usize) usize {
+        return lhs+rhs;
+    }
+
+    fn sub(lhs: usize, rhs: usize) usize {
+        return lhs-rhs;
+    }
+};
 
 pub fn highlightCode(code: [:0]const u8, file_path: []const u8, span: Span, comptime fmt: []const u8, args: anytype) void {
     std.debug.assert(span.isCorrect());

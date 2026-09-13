@@ -1,76 +1,26 @@
 const std = @import("std");
 
 const utils = @import("utils.zig");
+const lexer = @import("lexer.zig");
+const parser = @import("parser.zig");
+const lowerer = @import("lowerer.zig");
 
 const Span = utils.Span;
-const Instruction = @import("lowerer.zig").Instruction;
+const Instruction = lowerer.Instruction;
 
-pub const Inliner = struct {
-    source_instruction: []const Instruction,
-    executable_instructions: std.ArrayList(Instruction),
+pub const Index = u32;
 
-    files: std.StringHashMap(usize),
-
-    ty_defs: std.ArrayList(TypeDef),
-    static_values: std.ArrayList(ValueContainer),
-
-    pub const TypeDef = union(enum) {
-        struct_def: StructDef,
-
-        pub const StructDef = struct {
-            // filds: []const Field,
-            decls: []Decl,
-
-            pub const Decl = struct {
-                name: []const u8,
-
-                value: union(enum) {
-                    unevaluated: struct {
-                        type: Span,
-                        value: Span,
-                    },
-                    evaluated: usize,
-                },
-            };
-        };
-    };
-
-    pub fn sizeOf(self: Inliner, ty: Type) usize {
-        _ = self;
-        _ = ty;
-
-        return 1;
-    }
-
-    pub fn alignOf(self: Inliner, ty: Type) usize {
-        _ = self;
-        _ = ty;
-
-        return 1;
-    }
-};
-
-pub const ValueContainer = struct {
-    value: []const u8,
-    ty: Type,
-
-    pub fn deinit(self: ValueContainer, allocator: std.mem.Allocator) void {
-        allocator.free(self.value);
-        self.ty.deinit(allocator);
-    }
-};
-
-pub const Type = union(enum) {
-    int_literal: void,
+pub const TypeInfo = union(enum) {
     int: Int,
 
-    defined: usize,
+    @"struct": Struct,
 
-    reference: *Type,
-    ty: void,
+    @"void",
+
+    ty,
 
     pub const Int = struct {
-        bit_count: u16,
+        bits: u16,
         signedness: Signedness,
 
         pub const Signedness = enum {
@@ -79,40 +29,85 @@ pub const Type = union(enum) {
         };
     };
 
-    pub fn deinit(self: Type, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .int_literal => {},
-            .int => {},
+    pub const Struct = struct {
+        fields: []const Field,
+        decls: []const StaticDecl,
 
-            .defined => {},
-
-            .reference => |d| {
-                d.deinit(allocator);
-                allocator.destroy(d);
-            },
-
-            .ty => {},
-        }
-    }
-
-    pub fn clone(self: Type, allocator: std.mem.Allocator) !Type {
-        switch (self) {
-            .int_literal => return self,
-            .int => return self,
-
-            .defined => return self,
-
-            .reference => |d| return .{ .reference = try utils.createAndCopy(Type, allocator, try d.clone(allocator)) },
-            .ty => return self,
-        }
-    }
-
-    pub fn removeReference(self: Type) Type {
-        return switch (self) {
-            .reference => |d| d.*,
-            else => self,
+        pub const Field = struct {
+            name: []const u8,
+            ty: Index,
         };
-    }
+    };
+
+    pub const StaticDecl = struct {
+        name: []const u8,
+        value: Index,
+    };
 };
 
-pub fn inlineFile() void {}
+pub const TypePool = struct {
+    ty_descs: std.ArrayList(TypeDesc),
+
+    pub fn get(self: TypePool, index: Index) TypeInfo {
+        switch (index) {
+            0...65535 => unreachable, // TODO
+
+            65536...131071 => unreachable, // TODO
+
+            131072 => return .@"void",
+
+            131073 => return .ty,
+
+            else => self.ty_descs.items[index-131074].toInfo()
+        }
+    }
+
+    pub fn put(self: *TypePool, info: TypeInfo) Index {
+        _ = self;
+        
+        switch (info) {
+            .int => unreachable, // TODO
+
+            .@"struct" => unreachable, // TODO
+
+            .@"void" => return 121072,
+
+            .ty => return 121073,
+        }
+    }
+
+    // Type Description
+    pub const TypeDesc = union(enum) {
+        @"struct": Struct,
+
+        pub const Struct = struct {
+            // fields: []const Field,
+            decls: []const StaticDecl,
+
+            pub const Field = struct {
+                name: []const u8,
+                ty: Index,
+            };
+        };
+
+        pub const StaticDecl = struct {
+            name: []const u8,
+            value: union(enum) {
+                unevaluated: struct {
+                    ty: Span,
+                    value: Span,
+                },
+            }
+        };
+        
+        pub fn toInfo(self: TypeDesc) TypeInfo {
+            switch (self) {
+                .@"struct" => {
+                    
+                },
+            }
+            
+            unreachable; // TODO
+        }
+    };
+};

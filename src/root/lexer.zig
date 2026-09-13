@@ -16,9 +16,10 @@ pub const Token = struct {
 
         invalid,
         
-        @"builtin @as",
-
-        @"macro #inline",
+        @"builtin @alignOf",
+        @"builtin @sizeOf",
+        
+        @"macro #subst",
         @"macro #import",
 
         @"keyword struct",

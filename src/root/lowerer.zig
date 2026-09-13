@@ -1,6 +1,8 @@
 const std = @import("std");
 
-const Span = @import("utils.zig").Span;
+const utils = @import("utils.zig");
+
+const Span = utils.Span;
 
 pub const Instruction = union(enum) {
     get: Get,
@@ -15,9 +17,18 @@ pub const Instruction = union(enum) {
     block: Block,
 
     copy: Copy,
-
-    // macro_inline: MacroInline,
+    
+    // macro_subst: MacroSubst,
     // inlined_decl: InlinedDecl,
+
+
+    // for inliner stage
+    remove_ref: RemoveRef,
+
+    static_ref: StaticRef,
+    subst_param: SubstParam,
+
+    
 
     pub const Get = struct {
         identifier: []const u8,
@@ -28,13 +39,19 @@ pub const Instruction = union(enum) {
 
     pub const StructDef = struct {
         fields: []Field,
-        decls: []Decl,
+        decls: []StaticDecl,
 
         pub const Field = struct {
             name: []const u8,
             ty: Span,
         };
     };
+    pub const StaticDecl = struct {
+        name: []const u8,
+        ty: ?Span,
+        value: Span,
+    };
+    
     pub const FuncDef = struct {
         params: []Param,
         ret_ty: Span,
@@ -49,11 +66,11 @@ pub const Instruction = union(enum) {
     pub const Decl = struct {
         name: []const u8,
         ty: ?Span,
-        value: Span,
+        value: usize,
     };
     pub const Assign = struct {
         target: usize,
-        value: Span,
+        value: usize,
     };
 
     pub const Block = struct {
@@ -64,8 +81,20 @@ pub const Instruction = union(enum) {
         index: usize,
     };
 
-    // pub fn clone(self: Instruction, allocator: std.mem.Allocator) Instruction {}
+    pub const RemoveRef = struct {
+        index: usize,
+    };
 
+    pub const StaticRef = struct {
+        name: []const u8,
+        value: usize,
+    };
+    pub const SubstParam = struct {
+        name: []const u8,
+        value: @import("inliner.zig").ValueContainer,
+    };
+
+    
     pub fn deinit(self: Instruction, allocator: std.mem.Allocator) void {
         switch (self) {
             .get => |d| {
@@ -89,17 +118,75 @@ pub const Instruction = union(enum) {
             .decl => |d| {
                 allocator.free(d.name);
             },
-            .assign => |d| {
-                _ = d;
-            },
+            .assign => {},
 
-            .block => |d| {
-                _ = d;
-            },
+            .block => {},
 
-            .copy => |d| {
-                _ = d;
+            .copy => {},
+
+            .remove_ref => {},
+
+            .static_ref => |d| {
+                allocator.free(d.name);
             },
+            .subst_param => |d| {
+                allocator.free(d.name);
+                d.value.deinit(allocator);
+            },
+        }
+    }
+
+    pub fn cloneMut(self: *Instruction, allocator: std.mem.Allocator) void {
+        _ = self;
+        _ = allocator;
+        
+        unreachable; // TODO
+    }
+
+    pub fn shiftMut(self: *Instruction, value: usize, direction: utils.Direction) void {
+        const op = direction.to_op();
+
+        switch (self.*) {
+            .get => {},
+            .int => {},
+        
+            .struct_def => |*d| {
+                for (d.decls) |*decl| {
+                    if (decl.ty) |*ty| ty.shiftMut(value, direction);
+                    decl.value.shiftMut(value, direction);
+                }
+                
+                for (d.fields) |*field| field.ty.shiftMut(value, direction);
+            },
+            .func_def => |*d| {
+                for (d.params) |*param| param.type.shiftMut(value, direction);
+                d.ret_ty.shiftMut(value, direction);
+                d.body.shiftMut(value, direction);
+            },
+        
+            .decl => |*d| {
+                if (d.ty) |*ty| ty.shiftMut(value, direction);
+                d.value = op(d.value, value);
+            },
+            .assign => |*d| {
+                d.target = op(d.target, value);
+                d.value = op(d.value, value);
+            },
+        
+            .block => |*d| {
+                d.body.shiftMut(value, direction);
+            },
+        
+            .copy => |*d| {
+                d.index = op(d.index, value);
+            },
+            
+            .remove_ref => |*d| {
+                d.index = op(d.index, value);
+            },
+        
+            .static_ref => {},
+            .subst_param => {},
         }
     }
 };
@@ -138,7 +225,7 @@ pub const Lowerer = struct {
 
                 result.name = try self.gpa.dupe(u8, d.name);
                 result.ty = if (d.ty) |ty| try self.lower(ty) else null;
-                result.value = try self.lower(d.value);
+                result.value = (try self.lower(d.value)).end-1;
 
                 self.instructions.items[value_pos] = .{ .decl = result };
             },
@@ -150,7 +237,7 @@ pub const Lowerer = struct {
                 value_pos = self.instructions.items.len;
                 try self.instructions.append(self.gpa, undefined);
 
-                result.value = try self.lower(d.value);
+                result.value = (try self.lower(d.value)).end-1;
 
                 self.instructions.items[value_pos] = .{ .assign = result };
             },
@@ -179,7 +266,7 @@ pub const Lowerer = struct {
                 try self.instructions.append(self.gpa, undefined);
 
                 result.fields = try self.gpa.alloc(Instruction.StructDef.Field, d.fields.len);
-                result.decls = try self.gpa.alloc(Instruction.Decl, d.decls.len);
+                result.decls = try self.gpa.alloc(Instruction.StaticDecl, d.decls.len);
 
                 for (d.decls, result.decls) |decl, *out| {
                     out.name = try self.gpa.dupe(u8, decl.tag.decl.name);
@@ -216,7 +303,7 @@ pub const Lowerer = struct {
     }
 };
 
-pub fn lowerFile(file_node: *const @import("parser.zig").ASTNode, gpa: std.mem.Allocator) ![]const Instruction {
+pub fn lowerFile(file_node: *const @import("parser.zig").ASTNode, gpa: std.mem.Allocator) ![]Instruction {
     var lowerer: Lowerer = .{
         .gpa = gpa,
     };
