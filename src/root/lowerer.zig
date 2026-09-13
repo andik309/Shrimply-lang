@@ -108,8 +108,10 @@ pub const Lowerer = struct {
     instructions: std.ArrayList(Instruction) = .empty,
     gpa: std.mem.Allocator,
 
-    fn lower(self: *Lowerer, node: *const @import("parser.zig").ASTNode) anyerror!usize {
+    fn lower(self: *Lowerer, node: *const @import("parser.zig").ASTNode) anyerror!Span {
         var value_pos: usize = undefined;
+
+        const span_start = self.instructions.items.len;
 
         switch (node.tag) {
             .identifier => |d| {
@@ -135,20 +137,20 @@ pub const Lowerer = struct {
                 try self.instructions.append(self.gpa, undefined);
 
                 result.name = try self.gpa.dupe(u8, d.name);
-                result.ty = if (d.ty) |ty| try self.lowerPost(ty) else null;
-                result.value = try self.lowerPost(d.value);
+                result.ty = if (d.ty) |ty| try self.lower(ty) else null;
+                result.value = try self.lower(d.value);
 
                 self.instructions.items[value_pos] = .{ .decl = result };
             },
             .assign => |d| {
                 var result: Instruction.Assign = undefined;
 
-                result.target = try self.lowerPre(d.target);
+                result.target = (try self.lower(d.target)).end-1;
 
                 value_pos = self.instructions.items.len;
                 try self.instructions.append(self.gpa, undefined);
 
-                result.value = try self.lowerPost(d.value);
+                result.value = try self.lower(d.value);
 
                 self.instructions.items[value_pos] = .{ .assign = result };
             },
@@ -161,7 +163,7 @@ pub const Lowerer = struct {
                 try self.instructions.append(self.gpa, undefined);
 
                 result.body.start = self.instructions.items.len;
-                for (d.body) |*inner_node| _ = try self.lowerPre(inner_node);
+                for (d.body) |*inner_node| _ = (try self.lower(inner_node)).end-1;
                 result.body.end = self.instructions.items.len;
 
                 self.instructions.items[value_pos] = .{ .block = result };
@@ -181,8 +183,8 @@ pub const Lowerer = struct {
 
                 for (d.decls, result.decls) |decl, *out| {
                     out.name = try self.gpa.dupe(u8, decl.tag.decl.name);
-                    out.ty = if (decl.tag.decl.ty) |ty| try self.lowerPost(ty) else null;
-                    out.value = try self.lowerPost(decl.tag.decl.value);
+                    out.ty = if (decl.tag.decl.ty) |ty| try self.lower(ty) else null;
+                    out.value = try self.lower(decl.tag.decl.value);
                 }
 
                 self.instructions.items[value_pos] = .{ .struct_def = result };
@@ -197,8 +199,8 @@ pub const Lowerer = struct {
 
                 result.params = try self.gpa.alloc(Instruction.FuncDef.Param, d.params.len);
 
-                result.ret_ty = try self.lowerPost(d.ret_ty);
-                result.body = try self.lowerPost(d.body);
+                result.ret_ty = try self.lower(d.ret_ty);
+                result.body = try self.lower(d.body);
 
                 self.instructions.items[value_pos] = .{ .func_def = result };
             },
@@ -206,25 +208,11 @@ pub const Lowerer = struct {
             else => |_, tag| std.debug.panic("node {s} cant be lowered now, its not implemented", .{@tagName(tag)}),
         }
 
-        return value_pos;
-    }
+        if (value_pos != self.instructions.items.len-1) try self.instructions.append(self.gpa, .{ .copy = .{ .index = value_pos } });
 
-    fn lowerPost(self: *Lowerer, node: *const @import("parser.zig").ASTNode) anyerror!Span {
-        const start = self.instructions.items.len;
+        const span_end = self.instructions.items.len;
 
-        const value_pos = try self.lower(node);
-        try self.instructions.append(self.gpa, .{ .copy = .{ .index = value_pos } });
-
-        const end = self.instructions.items.len;
-
-        return .{
-            .start = start,
-            .end = end,
-        };
-    }
-
-    fn lowerPre(self: *Lowerer, node: *const @import("parser.zig").ASTNode) anyerror!usize {
-        return self.lower(node);
+        return .{ .start = span_start, .end = span_end };
     }
 };
 
@@ -233,7 +221,7 @@ pub fn lowerFile(file_node: *const @import("parser.zig").ASTNode, gpa: std.mem.A
         .gpa = gpa,
     };
 
-    _ = try lowerer.lowerPost(file_node);
+    _ = try lowerer.lower(file_node);
 
     return try lowerer.instructions.toOwnedSlice(lowerer.gpa);
 }

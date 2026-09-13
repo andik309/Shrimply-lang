@@ -36,15 +36,21 @@ pub const Inliner = struct {
     };
 
     pub fn sizeOf(self: Inliner, ty: Type) usize {
+        _ = self;
+        _ = ty;
+
         return 1;
     }
 
     pub fn alignOf(self: Inliner, ty: Type) usize {
+        _ = self;
+        _ = ty;
+
         return 1;
     }
 };
 
-pub const ValueContainer = struct { 
+pub const ValueContainer = struct {
     value: []const u8,
     ty: Type,
 
