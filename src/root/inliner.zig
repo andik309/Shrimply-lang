@@ -50,9 +50,15 @@ pub const TypePool = struct {
 
     pub fn get(self: TypePool, index: Index) TypeInfo {
         switch (index) {
-            0...65535 => unreachable, // TODO signed
+            0...65535 => return .{ .int = .{
+                .signedness = .signed,
+                .bits = @truncate(index-0),
+            } },
 
-            65536...131071 => unreachable, // TODO unsigned
+            65536...131071 => return .{ .int = .{
+                .signedness = .unsigned,
+                .bits = @truncate(index-65536),
+            } },
 
             131072 => return .@"void",
 
@@ -64,12 +70,12 @@ pub const TypePool = struct {
 
     pub fn put(self: *TypePool, info: TypeInfo) Index {
         _ = self;
-                
+
         switch (info) {
             .int => |d| {
                 return switch (d.signedness) {
-                    .signed => 0+d.bits,
-                    .unsigned => 65536+d.bits,
+                    .signed => @as(u32, d.bits)+0,
+                    .unsigned => @as(u32, d.bits)+65536,
                 }; 
             }, // TODO
 
