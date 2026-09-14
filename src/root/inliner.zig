@@ -50,9 +50,9 @@ pub const TypePool = struct {
 
     pub fn get(self: TypePool, index: Index) TypeInfo {
         switch (index) {
-            0...65535 => unreachable, // TODO
+            0...65535 => unreachable, // TODO signed
 
-            65536...131071 => unreachable, // TODO
+            65536...131071 => unreachable, // TODO unsigned
 
             131072 => return .@"void",
 
@@ -64,9 +64,14 @@ pub const TypePool = struct {
 
     pub fn put(self: *TypePool, info: TypeInfo) Index {
         _ = self;
-        
+                
         switch (info) {
-            .int => unreachable, // TODO
+            .int => |d| {
+                return switch (d.signedness) {
+                    .signed => 0+d.bits,
+                    .unsigned => 65536+d.bits,
+                }; 
+            }, // TODO
 
             .@"struct" => unreachable, // TODO
 
@@ -77,37 +82,13 @@ pub const TypePool = struct {
     }
 
     // Type Description
-    pub const TypeDesc = union(enum) {
-        @"struct": Struct,
+    const TypeDesc = union(enum) {
+        @"struct": TypeInfo.Struct,
 
-        pub const Struct = struct {
-            // fields: []const Field,
-            decls: []const StaticDecl,
-
-            pub const Field = struct {
-                name: []const u8,
-                ty: Index,
-            };
-        };
-
-        pub const StaticDecl = struct {
-            name: []const u8,
-            value: union(enum) {
-                unevaluated: struct {
-                    ty: Span,
-                    value: Span,
-                },
-            }
-        };
-        
         pub fn toInfo(self: TypeDesc) TypeInfo {
             switch (self) {
-                .@"struct" => {
-                    
-                },
+                .@"struct" => |d| return .{ .@"struct" = d },
             }
-            
-            unreachable; // TODO
         }
     };
 };
