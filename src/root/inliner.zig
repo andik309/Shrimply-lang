@@ -9,11 +9,13 @@ const Span = utils.Span;
 const Instruction = lowerer.Instruction;
 
 pub const Index = u32;
+pub const TypeIndex = Index;
 
 pub const TypeInfo = union(enum) {
     int: Int,
 
     @"struct": Struct,
+    @"fn": Fn,
 
     @"void",
 
@@ -35,20 +37,24 @@ pub const TypeInfo = union(enum) {
 
         pub const Field = struct {
             name: []const u8,
-            ty: Index,
+            ty: TypeIndex,
         };
     };
-
     pub const StaticDecl = struct {
         name: []const u8,
         value: Index,
+    };
+
+    pub const Fn = struct {
+        params: []const TypeIndex,
+        ret_ty: TypeIndex,
     };
 };
 
 pub const TypePool = struct {
     ty_descs: std.ArrayList(TypeDesc),
 
-    pub fn get(self: TypePool, index: Index) TypeInfo {
+    pub fn get(self: TypePool, index: TypeIndex) TypeInfo {
         switch (index) {
             0...65535 => return .{ .int = .{
                 .signedness = .signed,
@@ -68,7 +74,7 @@ pub const TypePool = struct {
         }
     }
 
-    pub fn put(self: *TypePool, info: TypeInfo) Index {
+    pub fn put(self: *TypePool, info: TypeInfo) TypeIndex {
         _ = self;
 
         switch (info) {
@@ -90,11 +96,79 @@ pub const TypePool = struct {
     // Type Description
     const TypeDesc = union(enum) {
         @"struct": TypeInfo.Struct,
+        @"fn": TypeInfo.Fn,
 
         pub fn toInfo(self: TypeDesc) TypeInfo {
             switch (self) {
                 .@"struct" => |d| return .{ .@"struct" = d },
+                .@"fn" => |d| return .{ .@"fn" = d },
             }
         }
     };
+};
+
+
+
+pub const ValueContainer = struct {
+    data: []u8,
+    ty: TypeIndex,
+};
+
+pub const Inliner = struct {
+    source_instructions: std.ArrayList(Instruction),
+    executable_instructions: std.ArrayList(Instruction),
+    
+    ty_pool: TypePool,
+    static_values: std.ArrayList(ValueContainer),
+    func_defs: FuncDef,
+
+    gpa: std.mem.Allocator,
+
+    
+
+    pub const FuncDef = struct {
+        params: []const Param,
+        ret_ty: TypeIndex,
+        body: Span, // executable instructions
+        
+        pub const Param = struct {
+            name: []const u8,
+            ty: TypeIndex,
+        };
+    };
+
+    pub fn makeInstructionsExecutable(self: *Inliner, source_span: Span) !void {
+        var source_pos = source_span.start;
+        
+        while (source_pos != source_span.end) {
+            var instruction = self.source_instructions.items[source_pos];
+            instruction.cloneMut(self.gpa);
+            
+            switch (instruction) {
+                .get => {
+                    try self.executable_instructions.append(self.gpa, instruction);
+                },
+                .int => {
+                    try self.executable_instructions.append(self.gpa, instruction);
+                },
+            
+                .struct_def => {
+                    try self.executable_instructions.append(self.gpa, instruction);
+                },
+                // func_def: FuncDef,
+            
+                // decl: Decl,
+                // assign: Assign,
+            
+                // block: Block,
+            
+                // copy: Copy,
+
+                // static_ref: StaticRef,
+                // subst_param: SubstParam,
+                
+                else => unreachable, // TODO
+            }
+        }
+    }
 };

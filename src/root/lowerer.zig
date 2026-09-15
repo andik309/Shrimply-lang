@@ -23,8 +23,6 @@ pub const Instruction = union(enum) {
 
 
     // for inliner stage
-    remove_ref: RemoveRef,
-
     static_ref: StaticRef,
     subst_param: SubstParam,
 
@@ -78,10 +76,6 @@ pub const Instruction = union(enum) {
     };
 
     pub const Copy = struct {
-        index: usize,
-    };
-
-    pub const RemoveRef = struct {
         index: usize,
     };
 
@@ -141,6 +135,13 @@ pub const Instruction = union(enum) {
         _ = allocator;
         
         unreachable; // TODO
+    }
+
+    pub fn clone(self: Instruction, allocator: std.mem.Allocator) !Instruction {
+        var tmp = self;
+        try tmp.cloneMut(allocator);
+
+        return tmp;
     }
 
     pub fn shiftMut(self: *Instruction, value: usize, direction: utils.Direction) void {
