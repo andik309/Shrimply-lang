@@ -17,16 +17,6 @@ pub const Instruction = union(enum) {
     block: Block,
 
     copy: Copy,
-    
-    // macro_subst: MacroSubst,
-    // inlined_decl: InlinedDecl,
-
-
-    // for inliner stage
-    static_ref: StaticRef,
-    subst_param: SubstParam,
-
-    
 
     pub const Get = struct {
         identifier: []const u8,
@@ -49,7 +39,7 @@ pub const Instruction = union(enum) {
         ty: ?Span,
         value: Span,
     };
-    
+
     pub const FuncDef = struct {
         params: []Param,
         ret_ty: Span,
@@ -79,16 +69,8 @@ pub const Instruction = union(enum) {
         index: usize,
     };
 
-    pub const StaticRef = struct {
-        name: []const u8,
-        value: usize,
-    };
-    pub const SubstParam = struct {
-        name: []const u8,
-        value: @import("inliner.zig").ValueContainer,
-    };
-
     
+
     pub fn deinit(self: Instruction, allocator: std.mem.Allocator) void {
         switch (self) {
             .get => |d| {
@@ -130,11 +112,37 @@ pub const Instruction = union(enum) {
         }
     }
 
-    pub fn cloneMut(self: *Instruction, allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
-        
-        unreachable; // TODO
+    pub fn cloneMut(self: *Instruction, allocator: std.mem.Allocator) !void {
+        switch (self.*) {
+            .get => |*d| {
+                d.identifier = try allocator.dupe(u8, d.identifier);
+            }, 
+            .int => |*d| {
+                d.content = try allocator.dupe(u8, d.content);
+            }, 
+
+            .struct_def => |*d| {
+                d.decls = try allocator.dupe(Instruction.StaticDecl, d.decls);
+                d.fields = try allocator.dupe(Instruction.StructDef.Field, d.fields);
+
+                for (d.decls) |*decl| decl.name = try allocator.dupe(u8, decl.name);
+                for (d.fields) |*field| field.name = try allocator.dupe(u8, field.name);
+            }, 
+            .func_def => |*d| {
+                d.params = try allocator.dupe(Instruction.FuncDef.Param, d.params);
+                for (d.params) |*param| param.name = try allocator.dupe(u8, param.name);
+            }, 
+
+            .decl => unreachable, // TODO 
+            .assign => unreachable, // TODO 
+
+            .block => unreachable, // TODO 
+
+            .copy => {}, // TODO 
+
+            .static_ref => unreachable, // TODO 
+            .subst_param => unreachable, // TODO 
+        }
     }
 
     pub fn clone(self: Instruction, allocator: std.mem.Allocator) !Instruction {
@@ -150,13 +158,13 @@ pub const Instruction = union(enum) {
         switch (self.*) {
             .get => {},
             .int => {},
-        
+
             .struct_def => |*d| {
                 for (d.decls) |*decl| {
                     if (decl.ty) |*ty| ty.shiftMut(value, direction);
                     decl.value.shiftMut(value, direction);
                 }
-                
+
                 for (d.fields) |*field| field.ty.shiftMut(value, direction);
             },
             .func_def => |*d| {
@@ -164,7 +172,7 @@ pub const Instruction = union(enum) {
                 d.ret_ty.shiftMut(value, direction);
                 d.body.shiftMut(value, direction);
             },
-        
+
             .decl => |*d| {
                 if (d.ty) |*ty| ty.shiftMut(value, direction);
                 d.value = op(d.value, value);
@@ -173,21 +181,14 @@ pub const Instruction = union(enum) {
                 d.target = op(d.target, value);
                 d.value = op(d.value, value);
             },
-        
+
             .block => |*d| {
                 d.body.shiftMut(value, direction);
             },
-        
+
             .copy => |*d| {
                 d.index = op(d.index, value);
             },
-            
-            .remove_ref => |*d| {
-                d.index = op(d.index, value);
-            },
-        
-            .static_ref => {},
-            .subst_param => {},
         }
     }
 };

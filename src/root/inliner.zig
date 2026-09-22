@@ -8,7 +8,7 @@ const lowerer = @import("lowerer.zig");
 const Span = utils.Span;
 const Instruction = lowerer.Instruction;
 
-pub const Index = u32;
+pub const Index = usize;
 pub const TypeIndex = Index;
 
 pub const TypeInfo = union(enum) {
@@ -39,6 +39,11 @@ pub const TypeInfo = union(enum) {
             name: []const u8,
             ty: TypeIndex,
         };
+
+        pub fn getDecl(self: Struct, name: []const u8) ?Index {
+            for (self.decls) |decl| if (std.mem.eql(u8, decl.name, name)) return decl.value;
+            return null;
+        }
     };
     pub const StaticDecl = struct {
         name: []const u8,
@@ -52,7 +57,7 @@ pub const TypeInfo = union(enum) {
 };
 
 pub const TypePool = struct {
-    ty_descs: std.ArrayList(TypeDesc),
+    ty_descs: std.ArrayList(TypeDesc) = .empty,
 
     pub fn get(self: TypePool, index: TypeIndex) TypeInfo {
         switch (index) {
@@ -70,26 +75,31 @@ pub const TypePool = struct {
 
             131073 => return .ty,
 
-            else => self.ty_descs.items[index-131074].toInfo()
+            else => return self.ty_descs.items[index-131074].toInfo()
         }
     }
 
-    pub fn put(self: *TypePool, info: TypeInfo) TypeIndex {
-        _ = self;
-
+    pub fn put(self: *TypePool, info: TypeInfo, gpa: std.mem.Allocator) !TypeIndex {
         switch (info) {
             .int => |d| {
                 return switch (d.signedness) {
-                    .signed => @as(u32, d.bits)+0,
-                    .unsigned => @as(u32, d.bits)+65536,
-                }; 
+                    .signed => @as(Index, d.bits)+0,
+                    .unsigned => @as(Index, d.bits)+65536,
+                };
             }, // TODO
 
-            .@"struct" => unreachable, // TODO
+            .@"struct" => |d| {
+                const index: Index = @truncate(self.ty_descs.items.len+131074);
 
-            .@"void" => return 121072,
+                try self.ty_descs.append(gpa, .{ .@"struct" = d });
 
-            .ty => return 121073,
+                return index;
+            }, // TODO
+            .@"fn" => unreachable, // TODO
+
+            .@"void" => return 131072,
+
+            .ty => return 131073,
         }
     }
 
@@ -112,63 +122,137 @@ pub const TypePool = struct {
 pub const ValueContainer = struct {
     data: []u8,
     ty: TypeIndex,
+
+    pub fn fromInt(comptime Int: type, value: Int, allocator: std.mem.Allocator) !ValueContainer {
+        const bit_size = @typeInfo(Int).int.bits;
+        const signedness = @typeInfo(Int).int.signedness;
+        const alignment = @alignOf(Int);
+
+        const byte_size = comptime (std.math.divCeil(usize, bit_size, 8) catch unreachable);
+
+        var result: ValueContainer = undefined;
+
+        result.data = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), byte_size);
+        @as(*Int, @ptrCast(@alignCast(result.data))).* = value;
+
+        result.ty = switch (signedness) {
+            .signed => @as(Index, bit_size)+0,
+            .unsigned => @as(Index, bit_size)+65536,
+        };
+
+        return result;
+    }
+
+    pub fn toInt(self: ValueContainer, comptime Int: type) !Int {
+        const bit_size = @typeInfo(Int).int.bits;
+        const signedness = @typeInfo(Int).int.signedness;
+
+        const expected_ty = switch (signedness) {
+            .signed => @as(Index, bit_size)+0,
+            .unsigned => @as(Index, bit_size)+65536,
+        };
+
+        if (self.ty != expected_ty) return error.MismatchedTypes;
+
+        return @as(*Int, @ptrCast(@alignCast(self.data))).*;
+    }
 };
 
 pub const Inliner = struct {
-    source_instructions: std.ArrayList(Instruction),
-    executable_instructions: std.ArrayList(Instruction),
-    
-    ty_pool: TypePool,
-    static_values: std.ArrayList(ValueContainer),
-    func_defs: FuncDef,
+    instructions: std.ArrayList(Instruction) = .empty,
+
+    ty_pool: TypePool = .{},
+    static_values: std.ArrayList(StaticValue) = .empty,
+    func_defs: std.ArrayList(FuncDef) = .empty,
 
     gpa: std.mem.Allocator,
 
-    
+
+
+    pub const StaticValue = union(enum) {
+        evaluated: ValueContainer,
+        unevaluated: struct { ty: ?Span, value: Span },
+        evaluating,
+    };
 
     pub const FuncDef = struct {
         params: []const Param,
         ret_ty: TypeIndex,
-        body: Span, // executable instructions
-        
+        body: Span,
+
         pub const Param = struct {
             name: []const u8,
             ty: TypeIndex,
         };
     };
 
-    pub fn makeInstructionsExecutable(self: *Inliner, source_span: Span) !void {
-        var source_pos = source_span.start;
-        
-        while (source_pos != source_span.end) {
-            var instruction = self.source_instructions.items[source_pos];
-            instruction.cloneMut(self.gpa);
-            
-            switch (instruction) {
-                .get => {
-                    try self.executable_instructions.append(self.gpa, instruction);
-                },
-                .int => {
-                    try self.executable_instructions.append(self.gpa, instruction);
-                },
-            
-                .struct_def => {
-                    try self.executable_instructions.append(self.gpa, instruction);
-                },
-                // func_def: FuncDef,
-            
-                // decl: Decl,
-                // assign: Assign,
-            
-                // block: Block,
-            
-                // copy: Copy,
+    // callee owns `instructions` data
+    // caller owns `instructions`
+    pub fn putInstructions(self: *Inliner, instructions: []Instruction) !Span {
+        var span: Span = .{ .start = self.instructions.items.len, .end = undefined };
+        try self.instructions.appendSlice(self.gpa, instructions);
+        span.end = self.instructions.items.len;
 
-                // static_ref: StaticRef,
-                // subst_param: SubstParam,
-                
-                else => unreachable, // TODO
-            }
-        }
+        return span;
     }
 };
+
+pub const InlineTimeInterpretator = struct {
+    jobs: std.ArrayList(Job) = .empty,
+
+    inliner: *Inliner,
+
+    pub const Job = struct {
+        requested: union(enum) {
+            static_value: Index,
+            span: Span,
+        },
+        frames: std.ArrayList(Frame),
+
+        pub const Frame = struct {
+            ty: FrameTy,
+            pos: usize,
+        };
+
+        pub const FrameTy = union(enum) {
+            func_check: FuncCheck,
+            evaluation: Evaluation,
+
+            pub const FuncCheck = struct {
+                instructions: Span,
+                pos: usize,
+                values: std.AutoHashMap(usize, ValueContainer)
+            };
+
+            pub const Evaluation = struct {
+                instructions: Span,
+                pos: usize,
+                values: std.AutoHashMap(usize, ValueContainer)
+            };
+        };
+    };
+};
+
+pub fn inlineFile(file_code: [:0]const u8, file_path: []const u8, gpa: std.mem.Allocator) !void {
+    const file_tokens = try lexer.lexFile(file_code, file_path, gpa, false);
+
+    const file_node, var arena = try parser.parseFile(file_code, file_tokens, file_path, gpa);
+    gpa.free(file_tokens);
+
+    const file_ir = try lowerer.lowerFile(file_node, gpa);
+    _ = arena.reset(.free_all);
+
+    var inliner: Inliner = .{
+        .gpa = gpa,
+    };
+
+    var it_interpretator: InlineTimeInterpretator = .{
+        .inliner = inliner,
+    };
+
+    const source_span = try inliner.putInstructions(file_ir);
+    gpa.free(file_ir);
+
+    it_interpretator.jobs.append(it_interpretator.inliner.gpa, .{ .requested = .{ .span = source_span } });
+    
+}

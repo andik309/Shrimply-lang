@@ -683,7 +683,8 @@ pub const Lexer = struct {
     }
 
     pub fn resolveInvalidToken(self: Lexer, token: Token) TokenError {
-        _ = .{ self, token };
+        _ = self;
+        _ = token;
     }
 
     pub const TokenError = union(enum) {

@@ -4,6 +4,8 @@ const shpl = @import("shpl");
 pub fn main(init: std.process.Init) !void {
     errdefer |err| if (err == std.mem.Allocator.Error.OutOfMemory) std.debug.print("buy more ram lol\n", .{});
 
+    _ = &init;
+    
     const code =
         // \\ .,:;
         // \\
@@ -35,6 +37,8 @@ pub fn main(init: std.process.Init) !void {
         \\};
     ;
 
+    _ = &code;
+
     // const file_tokens = try shpl.lexer.lexFile(code, "<unknown>", init.gpa, false);
     // defer init.gpa.free(file_tokens);
 
@@ -51,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     //     std.debug.print("{:0>4} : {any}\n", .{ i, instruction });
     // }
 
-    const file_inlined_data = try shpl.inliner.inlineFile(code, "<unknown>", init.gpa);
+    // const file_inlined_data = try shpl.inliner.inlineFile(code, "<unknown>", init.gpa);
 
-    _ = file_inlined_data;
+    // _ = file_inlined_data;
 }
