@@ -47,7 +47,7 @@ pub fn StaticArrayList(comptime T: type, comptime n: usize) type {
     };
 }
 
-pub const Span = struct{
+pub const Span = struct {
     start: usize, end: usize,
 
     pub fn len(self: Span) usize {
@@ -125,15 +125,10 @@ pub fn getLineStartEndUsingPos(code: [:0]const u8, pos: usize) Span {
 }
 
 pub fn getRowColUsingPos(code: [:0]const u8, pos: usize) struct { row: usize, col: usize } {
-    return .{ .row = std.mem.countScalar(u8, code[0..pos], '\n'), .col = pos - if (std.mem.findScalarLast(u8, code[0..pos], '\n')) |i| i+1 else 0 };
-}
-
-pub fn getRowUsingPos(code: [:0]const u8, pos: usize) struct { row: usize, col: usize } {
-    return std.mem.countScalar(u8, code[0..pos], '\n');
-}
-
-pub fn getColUsingPos(code: [:0]const u8, pos: usize) struct { row: usize, col: usize } {
-    return pos - (std.mem.findScalarLast(u8, code[0..pos], '\n') orelse 0);
+    return .{ 
+        .row = std.mem.countScalar(u8, code[0..pos], '\n'), 
+        .col = pos - if (std.mem.findScalarLast(u8, code[0..pos], '\n')) |i| i+1 else 0 
+    };
 }
 
 
@@ -197,3 +192,8 @@ pub fn formatRawString(self: []const u8, writer: *std.Io.Writer) std.Io.Writer.E
         else => try writer.writeByte(ch),
     };
 }
+
+
+
+
+pub fn todo() noreturn { std.debug.panic("todo", .{}); }

@@ -1,316 +1,219 @@
-const std = @import("std");
+const ASTNode = @import("parser.zig").ASTNode;
 
+const std = @import("std");
 const utils = @import("utils.zig");
 
+const lexer = @import("lexer.zig");
+
 const Span = utils.Span;
+const Token = lexer.Token;
 
-pub const Instruction = union(enum) {
-    get: Get,
-    int: Int,
+pub const Instruction = struct {
+    loc: Span,
+    tag: Tag,
 
-    struct_def: StructDef,
-    func_def: FuncDef,
+    pub const Tag = union(enum) {
+        identifier: Identifier,
+        int: Int,
 
-    decl: Decl,
-    assign: Assign,
+        decl: Decl,
+        assign: Assign,
+        ret: Ret,
 
-    block: Block,
+        block: Block,
 
-    copy: Copy,
+        field: Field,
+        struct_def: StructDef,
 
-    pub const Get = struct {
-        identifier: []const u8,
-    };
-    pub const Int = struct {
-        content: []const u8,
-    };
+        func_def: FuncDef,
 
-    pub const StructDef = struct {
-        fields: []Field,
-        decls: []StaticDecl,
 
-        pub const Field = struct {
-            name: []const u8,
-            ty: Span,
-        };
-    };
-    pub const StaticDecl = struct {
-        name: []const u8,
-        ty: ?Span,
-        value: Span,
-    };
+        pub const Identifier = []const u8;
+        pub const Int = []const u8;
 
-    pub const FuncDef = struct {
-        params: []Param,
-        ret_ty: Span,
-        body: Span,
+        pub const Decl = struct { name: []const u8, ty: ?Span, value: Span };
+        pub const Assign = struct { target: Span, value: Span };
+        pub const Ret = struct { operand: ?Span };
 
-        pub const Param = struct {
-            name: []const u8,
-            type: Span,
-        };
-    };
+        pub const Block = struct { body: []Span };
 
-    pub const Decl = struct {
-        name: []const u8,
-        ty: ?Span,
-        value: usize,
-    };
-    pub const Assign = struct {
-        target: usize,
-        value: usize,
-    };
+        pub const Field = struct { name: []const u8, ty: ?Span, value: ?Span };
+        pub const StructDef = struct { decls: []Decl, fields: []Field };
 
-    pub const Block = struct {
-        body: Span,
-    };
+        pub const FuncDef = struct { params: []Param, ret_ty: Span, body: Span };
+        pub const Param = struct { name: []const u8, ty: Span };
 
-    pub const Copy = struct {
-        index: usize,
-    };
 
-    
-
-    pub fn deinit(self: Instruction, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .get => |d| {
-                allocator.free(d.identifier);
-            },
-            .int => |d| {
-                allocator.free(d.content);
-            },
-
-            .struct_def => |d| {
-                for (d.fields) |field| allocator.free(field.name);
-                allocator.free(d.fields);
-                for (d.decls) |decl| allocator.free(decl.name);
-                allocator.free(d.decls);
-            },
-            .func_def => |d| {
-                for (d.params) |param| allocator.free(param.name);
-                allocator.free(d.params);
-            },
-
-            .decl => |d| {
-                allocator.free(d.name);
-            },
-            .assign => {},
-
-            .block => {},
-
-            .copy => {},
-
-            .remove_ref => {},
-
-            .static_ref => |d| {
-                allocator.free(d.name);
-            },
-            .subst_param => |d| {
-                allocator.free(d.name);
-                d.value.deinit(allocator);
-            },
+        pub fn shiftMut(self: *Tag, dist: usize, direction: utils.Direction) void {
+            switch (self.*) {
+                .identifier => {},
+                .int => {},
+        
+                .decl => |*d| {
+                    if (d.ty) |*ty| ty.shiftMut(dist, direction);
+                    d.value.shiftMut(dist, direction);
+                },
+                .assign => |*d| {
+                    d.target.shiftMut(dist, direction);
+                    d.value.shiftMut(dist, direction);
+                },
+                .ret => |*d| {
+                    if (d.operand) |*operand| operand.shiftMut(dist, direction);
+                },
+        
+                .block => |d| {
+                    for (d.body) |*body_part| body_part.shiftMut(dist, direction);
+                },
+        
+                .field => |*d| {
+                    if (d.ty) |*ty| ty.shiftMut(dist, direction);
+                    if (d.value) |*value| value.shiftMut(dist, direction);
+                },
+                .struct_def => |d| {
+                    for (d.decls) |*decl| {
+                        if (decl.ty) |*ty| ty.shiftMut(dist, direction);
+                        decl.value.shiftMut(dist, direction);
+                    }
+                    for (d.fields) |*field| {
+                        if (field.ty) |*ty| ty.shiftMut(dist, direction);
+                    }
+                },
+        
+                .func_def => |*d| {
+                    for (d.params) |*param| param.ty.shiftMut(dist, direction);
+                    d.ret_ty.shiftMut(dist, direction);
+                    d.body.shiftMut(dist, direction);
+                },
+            }
         }
-    }
-
-    pub fn cloneMut(self: *Instruction, allocator: std.mem.Allocator) !void {
-        switch (self.*) {
-            .get => |*d| {
-                d.identifier = try allocator.dupe(u8, d.identifier);
-            }, 
-            .int => |*d| {
-                d.content = try allocator.dupe(u8, d.content);
-            }, 
-
-            .struct_def => |*d| {
-                d.decls = try allocator.dupe(Instruction.StaticDecl, d.decls);
-                d.fields = try allocator.dupe(Instruction.StructDef.Field, d.fields);
-
-                for (d.decls) |*decl| decl.name = try allocator.dupe(u8, decl.name);
-                for (d.fields) |*field| field.name = try allocator.dupe(u8, field.name);
-            }, 
-            .func_def => |*d| {
-                d.params = try allocator.dupe(Instruction.FuncDef.Param, d.params);
-                for (d.params) |*param| param.name = try allocator.dupe(u8, param.name);
-            }, 
-
-            .decl => unreachable, // TODO 
-            .assign => unreachable, // TODO 
-
-            .block => unreachable, // TODO 
-
-            .copy => {}, // TODO 
-
-            .static_ref => unreachable, // TODO 
-            .subst_param => unreachable, // TODO 
-        }
-    }
-
-    pub fn clone(self: Instruction, allocator: std.mem.Allocator) !Instruction {
-        var tmp = self;
-        try tmp.cloneMut(allocator);
-
-        return tmp;
-    }
-
-    pub fn shiftMut(self: *Instruction, value: usize, direction: utils.Direction) void {
-        const op = direction.to_op();
-
-        switch (self.*) {
-            .get => {},
-            .int => {},
-
-            .struct_def => |*d| {
-                for (d.decls) |*decl| {
-                    if (decl.ty) |*ty| ty.shiftMut(value, direction);
-                    decl.value.shiftMut(value, direction);
-                }
-
-                for (d.fields) |*field| field.ty.shiftMut(value, direction);
-            },
-            .func_def => |*d| {
-                for (d.params) |*param| param.type.shiftMut(value, direction);
-                d.ret_ty.shiftMut(value, direction);
-                d.body.shiftMut(value, direction);
-            },
-
-            .decl => |*d| {
-                if (d.ty) |*ty| ty.shiftMut(value, direction);
-                d.value = op(d.value, value);
-            },
-            .assign => |*d| {
-                d.target = op(d.target, value);
-                d.value = op(d.value, value);
-            },
-
-            .block => |*d| {
-                d.body.shiftMut(value, direction);
-            },
-
-            .copy => |*d| {
-                d.index = op(d.index, value);
-            },
-        }
-    }
+    };
 };
 
 pub const Lowerer = struct {
     instructions: std.ArrayList(Instruction) = .empty,
     gpa: std.mem.Allocator,
 
-    fn lower(self: *Lowerer, node: *const @import("parser.zig").ASTNode) anyerror!Span {
-        var value_pos: usize = undefined;
-
-        const span_start = self.instructions.items.len;
-
+    pub fn lowerNode(self: *Lowerer, node: *const ASTNode) anyerror!Span {
+        var result_span: Span = .{
+            .start = self.instructions.items.len,
+            .end = undefined,
+        };
+        
         switch (node.tag) {
             .identifier => |d| {
-                value_pos = self.instructions.items.len;
-                try self.instructions.append(self.gpa, .{ .get = .{ .identifier = try self.gpa.dupe(u8, d) } });
-            },
-            // .string => {},
-            // .char => {},
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = .{ .identifier = try self.gpa.dupe(u8, d) } });
+            }, 
+            .string => utils.todo(),
+            .char => utils.todo(),
             .int => |d| {
-                value_pos = self.instructions.items.len;
-                try self.instructions.append(self.gpa, .{ .int = .{ .content = try self.gpa.dupe(u8, d) } });
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = .{ .int = try self.gpa.dupe(u8, d) } });
             },
-
-            // add: Add,
-            // sub: Sub,
-            // mul: Mul,
-            // div: Div,
 
             .decl => |d| {
-                var result: Instruction.Decl = undefined;
+                const result_index = self.instructions.items.len;
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
 
-                value_pos = self.instructions.items.len;
-                try self.instructions.append(self.gpa, undefined);
+                const result: Instruction.Tag.Decl = .{
+                    .name = try self.gpa.dupe(u8, d.name),
+                    .ty = try self.lowerOptionalNode(d.ty),
+                    .value = try self.lowerNode(d.value),
+                };
 
-                result.name = try self.gpa.dupe(u8, d.name);
-                result.ty = if (d.ty) |ty| try self.lower(ty) else null;
-                result.value = (try self.lower(d.value)).end-1;
-
-                self.instructions.items[value_pos] = .{ .decl = result };
+                self.instructions.items[result_index].tag = .{ .decl = result };
             },
             .assign => |d| {
-                var result: Instruction.Assign = undefined;
+                const result_index = self.instructions.items.len;
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
 
-                result.target = (try self.lower(d.target)).end-1;
+                const result: Instruction.Tag.Assign = .{
+                    .target = try self.lowerNode(d.target),
+                    .value = try self.lowerNode(d.value),
+                };
 
-                value_pos = self.instructions.items.len;
-                try self.instructions.append(self.gpa, undefined);
-
-                result.value = (try self.lower(d.value)).end-1;
-
-                self.instructions.items[value_pos] = .{ .assign = result };
+                self.instructions.items[result_index].tag = .{ .assign = result };
             },
-            // .ret => {},
+            .ret => |d| {
+                const result_index = self.instructions.items.len;
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
+
+                const result: Instruction.Tag.Ret = .{
+                    .operand = try self.lowerOptionalNode(d.operand),
+                };
+
+                self.instructions.items[result_index].tag = .{ .ret = result };
+            },
 
             .block => |d| {
-                var result: Instruction.Block = undefined;
+                const result_index = self.instructions.items.len;
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
 
-                value_pos = self.instructions.items.len;
-                try self.instructions.append(self.gpa, undefined);
+                const result: Instruction.Tag.Block = .{
+                    .body = try self.gpa.alloc(Span, d.body.len),
+                };
 
-                result.body.start = self.instructions.items.len;
-                for (d.body) |*inner_node| _ = (try self.lower(inner_node)).end-1;
-                result.body.end = self.instructions.items.len;
+                for (d.body, result.body) |body_part, *out| {
+                    out.* = try self.lowerNode(&body_part);
+                }
 
-                self.instructions.items[value_pos] = .{ .block = result };
+                self.instructions.items[result_index].tag = .{ .block = result };
             },
 
-            .field => unreachable,
             .struct_def => |d| {
-                if (d.fields.len != 0) std.debug.panic("todo: implement field lowering", .{});
+                if (d.fields.len != 0) utils.todo();
+                const result_index = self.instructions.items.len;
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
 
-                var result: Instruction.StructDef = undefined;
-
-                value_pos = self.instructions.items.len;
-                try self.instructions.append(self.gpa, undefined);
-
-                result.fields = try self.gpa.alloc(Instruction.StructDef.Field, d.fields.len);
-                result.decls = try self.gpa.alloc(Instruction.StaticDecl, d.decls.len);
+                const result: Instruction.Tag.StructDef = .{
+                    .fields = try self.gpa.alloc(Instruction.Tag.Field, 0),
+                    .decls = try self.gpa.alloc(Instruction.Tag.Decl, d.decls.len),
+                };
 
                 for (d.decls, result.decls) |decl, *out| {
                     out.name = try self.gpa.dupe(u8, decl.tag.decl.name);
-                    out.ty = if (decl.tag.decl.ty) |ty| try self.lower(ty) else null;
-                    out.value = try self.lower(decl.tag.decl.value);
+                    out.ty = try self.lowerOptionalNode(decl.tag.decl.ty);
+                    out.value = try self.lowerNode(decl.tag.decl.value);
                 }
 
-                self.instructions.items[value_pos] = .{ .struct_def = result };
+                self.instructions.items[result_index].tag = .{ .struct_def = result };
             },
+            .field => unreachable,
+
             .func_def => |d| {
-                if (d.params.len != 0) std.debug.panic("todo: implement params lowering", .{});
+                if (d.params.len != 0) utils.todo();
+                
+                const result_index = self.instructions.items.len;
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
 
-                var result: Instruction.FuncDef = undefined;
+                const result: Instruction.Tag.FuncDef = .{
+                    .params = try self.gpa.alloc(Instruction.Tag.Param, d.params.len),
+                    .ret_ty = try self.lowerNode(d.ret_ty),
+                    .body = try self.lowerNode(d.body),
+                };
 
-                value_pos = self.instructions.items.len;
-                try self.instructions.append(self.gpa, undefined);
-
-                result.params = try self.gpa.alloc(Instruction.FuncDef.Param, d.params.len);
-
-                result.ret_ty = try self.lower(d.ret_ty);
-                result.body = try self.lower(d.body);
-
-                self.instructions.items[value_pos] = .{ .func_def = result };
+                self.instructions.items[result_index].tag = .{ .func_def = result };
             },
-
-            else => |_, tag| std.debug.panic("node {s} cant be lowered now, its not implemented", .{@tagName(tag)}),
+            .param => unreachable,
         }
 
-        if (value_pos != self.instructions.items.len-1) try self.instructions.append(self.gpa, .{ .copy = .{ .index = value_pos } });
+        result_span.end = self.instructions.items.len;
 
-        const span_end = self.instructions.items.len;
+        return result_span;
+    }
 
-        return .{ .start = span_start, .end = span_end };
+    pub fn lowerOptionalNode(self: *Lowerer, optional_node: ?*const ASTNode) anyerror!?Span {
+        return if (optional_node) |node| try self.lowerNode(node) else null;
     }
 };
 
-pub fn lowerFile(file_node: *const @import("parser.zig").ASTNode, gpa: std.mem.Allocator) ![]Instruction {
+pub fn lowerFile(code: [:0]const u8, file_path: []const u8, file_node: *ASTNode, gpa: std.mem.Allocator) ![]Instruction {
     var lowerer: Lowerer = .{
         .gpa = gpa,
     };
 
-    _ = try lowerer.lower(file_node);
+    _ = code; 
+    _ = file_path;
 
-    return try lowerer.instructions.toOwnedSlice(lowerer.gpa);
+    _ = try lowerer.lowerNode(file_node);
+
+    return lowerer.instructions.toOwnedSlice(lowerer.gpa);
 }

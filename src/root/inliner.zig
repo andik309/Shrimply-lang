@@ -1,258 +1,376 @@
 const std = @import("std");
 
-const utils = @import("utils.zig");
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const lowerer = @import("lowerer.zig");
+const utils = @import("utils.zig");
 
-const Span = utils.Span;
-const Instruction = lowerer.Instruction;
+const Span = @import("utils.zig").Span;
+const Instruction = @import("lowerer.zig").Instruction;
 
-pub const Index = usize;
-pub const TypeIndex = Index;
+
 
 pub const TypeInfo = union(enum) {
-    int: Int,
+    @"int": Int,
+    @"void": void,
+
+    @"type": void,
 
     @"struct": Struct,
-    @"fn": Fn,
-
-    @"void",
-
-    ty,
 
     pub const Int = struct {
         bits: u16,
         signedness: Signedness,
 
-        pub const Signedness = enum {
-            signed,
-            unsigned,
-        };
+        pub const Signedness = enum(u1) { signed = 0, unsigned = 1 };
+
+
     };
 
     pub const Struct = struct {
-        fields: []const Field,
-        decls: []const StaticDecl,
+        /// pos in instructions where it was defined,
+        /// its used for `eql` function
+        source: usize,
 
-        pub const Field = struct {
-            name: []const u8,
-            ty: TypeIndex,
-        };
+        inlined_decls: []InlinedDecls,
+        decls: []StaticDecl,
 
-        pub fn getDecl(self: Struct, name: []const u8) ?Index {
-            for (self.decls) |decl| if (std.mem.eql(u8, decl.name, name)) return decl.value;
-            return null;
+        // fields: []const Field,
+
+        // pub const Field = struct { name: []const u8, ty: u32 };
+
+        pub fn deinit(self: Struct, allocator: std.mem.Allocator) void {
+            for (self.decls) |decl| decl.deinit(allocator);
+            allocator.free(self.decls);
+
+            for (self.inlined_decls) |inlined_decl| inlined_decl.deinit(allocator);
+            allocator.free(self.inlined_decls);
         }
     };
+
     pub const StaticDecl = struct {
-        name: []const u8,
-        value: Index,
+        name: []const u8, static_value_index: usize,
+
+        pub fn deinit(self: StaticDecl, allocator: std.mem.Allocator) void {
+            allocator.free(self.name);
+        }
     };
 
-    pub const Fn = struct {
-        params: []const TypeIndex,
-        ret_ty: TypeIndex,
-    };
+    pub fn deinit(self: TypeInfo, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .@"int" => {},
+            .@"void" => {},
+
+            .@"type" => {},
+
+            .@"struct" => |d| d.deinit(allocator),
+        }
+    }
 };
+pub const InlinedDecls = union(enum) {
+    /// index of namespaced type
+    static_decls: usize,
+    // subst_params: []const struct{ name: []const u8, ValueContainer },
+
+    pub fn deinit(self: InlinedDecls, allocator: std.mem.Allocator) void {
+        _ = allocator;
+
+        switch (self) {
+            .static_decls => {},
+        }
+    }
+};
+
+
 
 pub const TypePool = struct {
-    ty_descs: std.ArrayList(TypeDesc) = .empty,
+    pool: std.ArrayList(PoolTypeInfo),
 
-    pub fn get(self: TypePool, index: TypeIndex) TypeInfo {
-        switch (index) {
-            0...65535 => return .{ .int = .{
-                .signedness = .signed,
-                .bits = @truncate(index-0),
-            } },
+    // self owns the result
+    pub fn get(self: TypePool, index: u32) TypeInfo {
+        return switch (index) {
+            0...65535      => .{ .@"int" = .{ .bits = @truncate(index-0),     .signedness = .signed   } },
+            65536...131071 => .{ .@"int" = .{ .bits = @truncate(index-65536), .signedness = .unsigned } },
+            131072 => .@"void",
+            131073 => .@"type",
 
-            65536...131071 => return .{ .int = .{
-                .signedness = .unsigned,
-                .bits = @truncate(index-65536),
-            } },
-
-            131072 => return .@"void",
-
-            131073 => return .ty,
-
-            else => return self.ty_descs.items[index-131074].toInfo()
-        }
+            else => {
+                switch (self.pool.items[index-131074]) {
+                    .@"struct" => |d| return .{ .@"struct" = d },
+                }
+            },
+        };
     }
 
-    pub fn put(self: *TypePool, info: TypeInfo, gpa: std.mem.Allocator) !TypeIndex {
+    // callee owns `info`
+    pub fn put(self: *TypePool, info: TypeInfo, gpa: std.mem.Allocator) !u32 {
         switch (info) {
-            .int => |d| {
-                return switch (d.signedness) {
-                    .signed => @as(Index, d.bits)+0,
-                    .unsigned => @as(Index, d.bits)+65536,
-                };
-            }, // TODO
-
-            .@"struct" => |d| {
-                const index: Index = @truncate(self.ty_descs.items.len+131074);
-
-                try self.ty_descs.append(gpa, .{ .@"struct" = d });
-
-                return index;
-            }, // TODO
-            .@"fn" => unreachable, // TODO
-
+            .@"int" => |d| return @as(u32, @intFromEnum(d.signedness))*65536 + @as(u32, d.bits),
             .@"void" => return 131072,
 
-            .ty => return 131073,
+            .@"type" => return 131073,
+
+            .@"struct" => |d| {
+                for (self.pool.items, 0..) |pool_type_info, i| {
+                    if (pool_type_info == .@"struct" and d.source == pool_type_info.@"struct".source) {
+                        info.deinit(gpa);
+                        return @truncate(i);
+                    }
+                }
+
+                const result = self.pool.items.len;
+
+                try self.pool.append(gpa, .{ .@"struct" = d });
+                return @truncate(result);
+            },
         }
     }
 
-    // Type Description
-    const TypeDesc = union(enum) {
+    pub const PoolTypeInfo = union(enum) {
         @"struct": TypeInfo.Struct,
-        @"fn": TypeInfo.Fn,
-
-        pub fn toInfo(self: TypeDesc) TypeInfo {
-            switch (self) {
-                .@"struct" => |d| return .{ .@"struct" = d },
-                .@"fn" => |d| return .{ .@"fn" = d },
-            }
-        }
     };
 };
+pub const Inliner = struct {
+    cwd: std.Io.Dir,
+    io: std.Io,
+    gpa: std.mem.Allocator,
+
+    pool: TypePool = .{ .pool = .empty },
+    static_values: std.ArrayList(StaticValue) = .empty,
+    cached_files: std.ArrayList(struct { file_path: []const u8, file_code: []const u8, type_index: u32, span: Span }) = .empty,
+
+    instructions: std.ArrayList(Instruction) = .empty,
+
+    pub const StaticValue = union(enum) {
+        unevaluated: struct { ty: ?Span, value: Span },
+        evaluated: ValueContainer,
+    };
+
+    pub fn deinit(self: Inliner) void {
+        self.cwd.close(self.io);
+        // utils.todo();
+    }
+
+    pub fn import(self: *Inliner, file_path: []const u8) !u32 {
+        for (self.cached_files.items) |cached_file| if (std.mem.eql(u8, file_path, cached_file.file_path)) return cached_file.type_index;
 
 
+        const file_code = try self.cwd.readFileAllocOptions(self.io, file_path, self.gpa, .unlimited, .fromByteUnits(@alignOf(u8)), 0);
 
-pub const ValueContainer = struct {
-    data: []u8,
-    ty: TypeIndex,
+        const file_tokens = try lexer.lexFile(file_code, "<unknown>", self.gpa, .only_invalid);
 
-    pub fn fromInt(comptime Int: type, value: Int, allocator: std.mem.Allocator) !ValueContainer {
-        const bit_size = @typeInfo(Int).int.bits;
-        const signedness = @typeInfo(Int).int.signedness;
-        const alignment = @alignOf(Int);
+        const file_node, var arena = try parser.parseFile(file_code, file_tokens, "<unknown>", self.gpa);
+        self.gpa.free(file_tokens);
 
-        const byte_size = comptime (std.math.divCeil(usize, bit_size, 8) catch unreachable);
+        const file_ir = try lowerer.lowerFile(file_code, "<unknown>", file_node, self.gpa);
+        _ = arena.reset(.free_all);
 
-        var result: ValueContainer = undefined;
 
-        result.data = try allocator.alignedAlloc(u8, .fromByteUnits(alignment), byte_size);
-        @as(*Int, @ptrCast(@alignCast(result.data))).* = value;
+        var instructions_span: Span = .{ .start = self.instructions.items.len, .end = undefined };
+        for (file_ir) |*instr| instr.tag.shiftMut(instructions_span.start, .forward);
+        try self.instructions.appendSlice(self.gpa, file_ir);
+        instructions_span.end = self.instructions.items.len;
+        self.gpa.free(file_ir);
 
-        result.ty = switch (signedness) {
-            .signed => @as(Index, bit_size)+0,
-            .unsigned => @as(Index, bit_size)+65536,
+
+        var it_interpretator: InlineTimeInterpretator = .{
+            .inliner = self,
         };
+
+        try it_interpretator.jobs.append(it_interpretator.inliner.gpa, .{
+            .parent = 0,
+            .specific = .{ .start = .{} }
+        });
+        try it_interpretator.jobs.append(it_interpretator.inliner.gpa, .{
+            .parent = 0,
+            .specific = .{ .compute = .{
+                .index = instructions_span.start,
+            } }
+        });
+
+        var type_index: ValueContainer = undefined;
+        defer type_index.deinit(self.gpa);
+
+        while (true) {
+            try it_interpretator.step();
+
+            switch (it_interpretator.jobs.getLast().specific) {
+                .start => |d| { type_index = d.result; break; },
+                else => {},
+            }
+        }
+
+        const result = type_index.toInt(u32) catch unreachable;
+
+        try self.cached_files.append(self.gpa, .{
+            .file_path = try self.gpa.dupe(u8, file_path),
+            .file_code = file_code,
+            .type_index = result,
+            .span = instructions_span,
+        });
 
         return result;
     }
-
-    pub fn toInt(self: ValueContainer, comptime Int: type) !Int {
-        const bit_size = @typeInfo(Int).int.bits;
-        const signedness = @typeInfo(Int).int.signedness;
-
-        const expected_ty = switch (signedness) {
-            .signed => @as(Index, bit_size)+0,
-            .unsigned => @as(Index, bit_size)+65536,
-        };
-
-        if (self.ty != expected_ty) return error.MismatchedTypes;
-
-        return @as(*Int, @ptrCast(@alignCast(self.data))).*;
-    }
 };
-
-pub const Inliner = struct {
-    instructions: std.ArrayList(Instruction) = .empty,
-
-    ty_pool: TypePool = .{},
-    static_values: std.ArrayList(StaticValue) = .empty,
-    func_defs: std.ArrayList(FuncDef) = .empty,
-
-    gpa: std.mem.Allocator,
-
-
-
-    pub const StaticValue = union(enum) {
-        evaluated: ValueContainer,
-        unevaluated: struct { ty: ?Span, value: Span },
-        evaluating,
-    };
-
-    pub const FuncDef = struct {
-        params: []const Param,
-        ret_ty: TypeIndex,
-        body: Span,
-
-        pub const Param = struct {
-            name: []const u8,
-            ty: TypeIndex,
-        };
-    };
-
-    // callee owns `instructions` data
-    // caller owns `instructions`
-    pub fn putInstructions(self: *Inliner, instructions: []Instruction) !Span {
-        var span: Span = .{ .start = self.instructions.items.len, .end = undefined };
-        try self.instructions.appendSlice(self.gpa, instructions);
-        span.end = self.instructions.items.len;
-
-        return span;
-    }
-};
-
 pub const InlineTimeInterpretator = struct {
+    inliner: *Inliner,
     jobs: std.ArrayList(Job) = .empty,
 
-    inliner: *Inliner,
-
     pub const Job = struct {
-        requested: union(enum) {
-            static_value: Index,
-            span: Span,
-        },
-        frames: std.ArrayList(Frame),
+        parent: usize,
+        specific: Specific,
 
-        pub const Frame = struct {
-            ty: FrameTy,
-            pos: usize,
-        };
+        pub const Specific = union(enum) {
+            start: Start,
+            compute: Compute,
 
-        pub const FrameTy = union(enum) {
-            func_check: FuncCheck,
-            evaluation: Evaluation,
-
-            pub const FuncCheck = struct {
-                instructions: Span,
-                pos: usize,
-                values: std.AutoHashMap(usize, ValueContainer)
+            pub const Start = struct {
+                result: ValueContainer = undefined,
             };
 
-            pub const Evaluation = struct {
-                instructions: Span,
-                pos: usize,
-                values: std.AutoHashMap(usize, ValueContainer)
+            pub const Compute = struct {
+                values: std.ArrayList(ValueContainer) = .empty,
+                index: usize,
+
+                state: State = .asking_for_values,
+
+                pub const State = union(enum) {
+                    asking_for_values,
+                    computing,
+                };
             };
         };
     };
+
+    pub fn step(self: *InlineTimeInterpretator) !void {
+        const job_index = self.jobs.items.len-1;
+
+        switch (self.jobs.items[job_index].specific) {
+            .start => {
+                _ = self.jobs.pop();
+            },
+
+            .compute => |*d| {
+                const instruction = self.inliner.instructions.items[d.index];
+
+                switch (d.state) {
+                    .asking_for_values => {
+                        switch (instruction.tag) {
+                            .identifier => utils.todo(),
+                            .int => utils.todo(),
+
+                            .decl => utils.todo(),
+                            .assign => utils.todo(),
+                            .ret => utils.todo(),
+
+                            .block => utils.todo(),
+
+                            .field => utils.todo(),
+                            .struct_def => {
+                                d.state = .computing;
+                            },
+
+                            .func_def => utils.todo(),
+                        }
+                    },
+
+                    .computing => {
+                        switch (instruction.tag) {
+                            .identifier => utils.todo(),
+                            .int => utils.todo(),
+
+                            .decl => utils.todo(),
+                            .assign => utils.todo(),
+                            .ret => utils.todo(),
+
+                            .block => utils.todo(),
+
+                            .field => utils.todo(),
+                            .struct_def => |instruction_d| {
+                                if (instruction_d.fields.len != 0) utils.todo();
+
+                                const result: TypeInfo.Struct = .{
+                                    .source = d.index,
+                                    .decls = try self.inliner.gpa.alloc(TypeInfo.StaticDecl, instruction_d.decls.len),
+                                    .inlined_decls = try self.inliner.gpa.alloc(InlinedDecls, 0), // utils.todo();
+                                };
+
+                                for (instruction_d.decls, result.decls) |decl, *out| {
+                                    out.name = try self.inliner.gpa.dupe(u8, decl.name);
+
+                                    out.static_value_index = self.inliner.static_values.items.len;
+                                    try self.inliner.static_values.append(self.inliner.gpa, .{ .unevaluated = .{ .ty = decl.ty, .value = decl.value } });
+                                }
+
+                                const type_index = try self.inliner.pool.put(.{ .@"struct" = result }, self.inliner.gpa);
+
+                                try self.putValueToParentJob(self.jobs.items[job_index].parent, try .fromInt(u32, type_index, self.inliner.gpa));
+
+                                _ = self.jobs.pop();
+                            },
+
+                            .func_def => utils.todo(),
+                        }
+                    },
+                }
+            },
+        }
+    }
+
+    fn putValueToParentJob(self: *InlineTimeInterpretator, parent: usize, value: ValueContainer) !void {
+        switch (self.jobs.items[parent].specific) {
+            .start => |*d| {
+                d.result = value;
+            },
+
+            .compute => |*d| {
+                try d.values.append(self.inliner.gpa, value);
+            },
+        }
+    }
 };
 
-pub fn inlineFile(file_code: [:0]const u8, file_path: []const u8, gpa: std.mem.Allocator) !void {
-    const file_tokens = try lexer.lexFile(file_code, file_path, gpa, false);
+pub const ValueContainer = struct {
+    data: []u8, ty: u32,
 
-    const file_node, var arena = try parser.parseFile(file_code, file_tokens, file_path, gpa);
-    gpa.free(file_tokens);
+    pub fn deinit(self: ValueContainer, allocator: std.mem.Allocator) void {
+        allocator.free(self.data);
+    }
 
-    const file_ir = try lowerer.lowerFile(file_node, gpa);
-    _ = arena.reset(.free_all);
+    pub fn fromInt(comptime T: type, value: T, allocator: std.mem.Allocator) !ValueContainer {
+        const byte_count = comptime (std.math.ceilPowerOfTwo(usize, std.math.divCeil(usize, @typeInfo(T).int.bits, 8) catch unreachable) catch unreachable);
+        const data = try allocator.alloc(u8, byte_count);
 
+        std.mem.writeInt(T, @ptrCast(data), value, .native);
+
+        return .{
+            .data = data,
+            .ty = switch (@typeInfo(T).int.signedness) { .signed => 0, .unsigned => 65536 } + @as(u32, @typeInfo(T).int.bits),
+        };
+    }
+
+    pub fn toInt(self: ValueContainer, comptime T: type) !T {
+        if (self.ty != switch (@typeInfo(T).int.signedness) { .signed => 0, .unsigned => 65536 } + @as(u32, @typeInfo(T).int.bits)) return error.MismatchedType;
+
+        const byte_count = comptime (std.math.ceilPowerOfTwo(usize, std.math.divCeil(usize, @typeInfo(T).int.bits, 8) catch unreachable) catch unreachable);
+
+        const result = std.mem.readInt(T, self.data[0..byte_count], .native);
+
+        return result;
+    }
+};
+
+
+
+pub fn inlineFile(cwd: std.Io.Dir, io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) !void {
     var inliner: Inliner = .{
+        .cwd = cwd,
+        .io = io,
         .gpa = gpa,
     };
+    defer inliner.deinit();
 
-    var it_interpretator: InlineTimeInterpretator = .{
-        .inliner = inliner,
-    };
+    const type_index = try inliner.import(file_path);
 
-    const source_span = try inliner.putInstructions(file_ir);
-    gpa.free(file_ir);
-
-    it_interpretator.jobs.append(it_interpretator.inliner.gpa, .{ .requested = .{ .span = source_span } });
-    
+    std.debug.print("{}\n", .{ type_index });
 }

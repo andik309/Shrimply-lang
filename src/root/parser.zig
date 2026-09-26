@@ -27,10 +27,11 @@ pub const ASTNode = struct {
 
         block: Block,
 
-        field: Field,
         struct_def: StructDef,
+        field: Field,
 
         func_def: FuncDef,
+        param: Param,
 
 
         pub const Identifier = []const u8;
@@ -49,10 +50,11 @@ pub const ASTNode = struct {
 
         pub const Block = struct { body: []ASTNode };
 
-        pub const Field = struct { name: []const u8, ty: ?*ASTNode, value: ?*ASTNode };
         pub const StructDef = struct { decls: []ASTNode, fields: []ASTNode };
+        pub const Field = struct { name: []const u8, ty: ?*ASTNode, value: ?*ASTNode };
 
         pub const FuncDef = struct { params: []ASTNode, ret_ty: *ASTNode, body: *ASTNode };
+        pub const Param = struct { name: []const u8, ty: *ASTNode };
     };
 
     pub const cac = cacNode;
@@ -413,7 +415,8 @@ const Parser = struct {
 
     pub fn parseFuncParam(self: *Parser) !*ASTNode {
         _ = self;
-        unreachable; // TODO
+        
+        utils.todo();
     }
     // <func_param> ::= <identifier> ":" <full_expression>
 
@@ -454,8 +457,8 @@ pub fn unescapeString(str: []const u8, allocator: std.mem.Allocator) ![]const u8
     while (pos != str.len) switch (str[pos]) {
         '\\' => {
             try ret.append(allocator, switch (str[pos+1]) {
-                '0' => 0, 't' => 11, 'n' => 10, 'r' => 13,
-                else => unreachable,
+                '\'' => 39, '\"' => 34, 'n' => 10, 'r' => 13, 't' => 9, '0' => 0,
+                else => unreachable, // "else => continue :state .invalid," in lexer.zig
             });
             pos += 2;
         },

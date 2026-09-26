@@ -15,9 +15,12 @@ pub const Token = struct {
         int,
 
         invalid,
+
+        @"builtin @min",
+        @"builtin @max",
         
-        @"builtin @alignOf",
-        @"builtin @sizeOf",
+        @"macro #alignOf",
+        @"macro #sizeOf",
         
         @"macro #subst",
         @"macro #import",
@@ -577,7 +580,7 @@ pub const Lexer = struct {
             .@"//..." => {
                 self.pos += 1;
                 switch (self.code[self.pos]) {
-                    0x00...0x09, 0x0b...0x1f, 0x7f => continue :state .invalid,
+                    0x00...0x09, 0x0b...0x0c, 0x0e...0x1f, 0x7f => continue :state .invalid,
                     '\n' => continue :state .start,
                     else => continue :state .@"//...",
                 }
@@ -692,7 +695,13 @@ pub const Lexer = struct {
     };
 };
 
-pub fn lexFile(code: [:0]const u8, file_path: []const u8, gpa: std.mem.Allocator, need_highlighting: bool) ![]Token {
+pub const HighlightingSettings = enum {
+    none,
+    any,
+    only_invalid,
+};
+
+pub fn lexFile(code: [:0]const u8, file_path: []const u8, gpa: std.mem.Allocator, highlighting_settings: HighlightingSettings) ![]Token {
     var lexer = Lexer{ 
         .code = code,
         .file_path = file_path,
@@ -704,7 +713,15 @@ pub fn lexFile(code: [:0]const u8, file_path: []const u8, gpa: std.mem.Allocator
         const token = lexer.next();
         try result.append(gpa, token);
 
-        if (need_highlighting) highlightToken(token, code, file_path);
+        switch (highlighting_settings) {
+            .none => {},
+            .any => {
+                highlightToken(token, code, file_path);
+            },
+            .only_invalid => {
+                if (token.tag == .invalid) highlightToken(token, code, file_path);
+            },
+        }
 
         if (token.tag == .invalid) return error.LexingFailed;
         if (token.tag == .eof) break;
