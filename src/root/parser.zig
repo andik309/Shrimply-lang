@@ -25,6 +25,8 @@ pub const ASTNode = struct {
         assign: Assign,
         ret: Ret,
 
+        call: Call,
+
         block: Block,
 
         struct_def: StructDef,
@@ -47,6 +49,8 @@ pub const ASTNode = struct {
         pub const Decl = struct { name: []const u8, ty: ?*ASTNode, value: *ASTNode };
         pub const Assign = struct { target: *ASTNode, value: *ASTNode };
         pub const Ret = struct { operand: ?*ASTNode };
+
+        pub const Call = struct { callee: *ASTNode, args: []ASTNode };
 
         pub const Block = struct { body: []ASTNode };
 
@@ -86,6 +90,12 @@ const Parser = struct {
         const token = self.peek();
         self.pos += 1;
         return token;
+    }
+
+    pub fn drop(self: *Parser) void {
+        self.pos += 1;
+
+        _ = self.tokens[self.pos];
     }
 
     pub fn eat(self: *Parser, expected_tag: Token.Tag) !Span {
@@ -296,7 +306,37 @@ const Parser = struct {
 
     pub fn parseExprPostfix(self: *Parser) anyerror!ASTNode {
         // TODO
-        const result = try self.parseExprPrimary();
+        var result = try self.parseExprPrimary();
+
+        while (true) {
+            const peeked = self.peek();
+            switch (peeked.tag) {
+                .@"delim (" => {
+                    self.drop();
+
+                    var tmp_args: std.ArrayList(ASTNode) = .empty;
+                    while (self.peek().tag != .@"delim )") {
+                        const arg = try self.parseFullExpression();
+                        try tmp_args.append(self.gpa, arg);
+
+                        if (self.peek().tag != .@"punct ,") break;
+                    }
+                    _ = try self.eat(.@"delim )");
+
+                    const result_args = try self.arena.allocator().alloc(ASTNode, tmp_args.items.len);
+                    for (tmp_args.items, result_args) |arg, *out| {
+                        out.* = arg;
+                    }
+
+                    result = ASTNode{ .loc = peeked.loc, .tag = .{ .call = .{
+                        .callee = try result.cac(self.arena.allocator()),
+                        .args = result_args,
+                    } } };
+                },
+                else => break,
+            }
+        }
+
         return result;
     }
     // <expr_postfix> ::= <expr_primary>
@@ -415,8 +455,9 @@ const Parser = struct {
 
     pub fn parseFuncParam(self: *Parser) !*ASTNode {
         _ = self;
-        
-        utils.todo();
+
+        try utils.todoAsError();
+        unreachable;
     }
     // <func_param> ::= <identifier> ":" <full_expression>
 

@@ -1,12 +1,12 @@
-const ASTNode = @import("parser.zig").ASTNode;
-
 const std = @import("std");
 const utils = @import("utils.zig");
 
 const lexer = @import("lexer.zig");
+const parser = @import("parser.zig");
 
 const Span = utils.Span;
-const Token = lexer.Token;
+
+const ASTNode = parser.ASTNode;
 
 pub const Instruction = struct {
     loc: Span,
@@ -20,9 +20,10 @@ pub const Instruction = struct {
         assign: Assign,
         ret: Ret,
 
+        call: Call,
+
         block: Block,
 
-        field: Field,
         struct_def: StructDef,
 
         func_def: FuncDef,
@@ -35,20 +36,66 @@ pub const Instruction = struct {
         pub const Assign = struct { target: Span, value: Span };
         pub const Ret = struct { operand: ?Span };
 
+        pub const Call = struct { callee: Span, args: []Span };
+
         pub const Block = struct { body: []Span };
 
-        pub const Field = struct { name: []const u8, ty: ?Span, value: ?Span };
         pub const StructDef = struct { decls: []Decl, fields: []Field };
+        pub const Field = struct { name: []const u8, ty: ?Span, value: ?Span };
 
         pub const FuncDef = struct { params: []Param, ret_ty: Span, body: Span };
         pub const Param = struct { name: []const u8, ty: Span };
 
 
+        pub fn deinit(self: Tag, allocator: std.mem.Allocator) void {
+            switch (self) {
+                .identifier => |d| {
+                    allocator.free(d);
+                },
+                .int => |d| {
+                    allocator.free(d);
+                },
+        
+                .decl => |d| {
+                    allocator.free(d.name);
+                },
+                .assign => {},
+                .ret => {},
+
+                .call => |d| {
+                    allocator.free(d.args);
+                },
+        
+                .block => |d| {
+                    allocator.free(d.body);
+                },
+        
+                .struct_def => |d| {
+                    for (d.fields) |field| {
+                        allocator.free(field.name);
+                    }
+                    allocator.free(d.fields);
+
+                    for (d.decls) |decl| {
+                        allocator.free(decl.name);
+                    }
+                    allocator.free(d.decls);
+                },
+        
+                .func_def => |d| {
+                    for (d.params) |param| {
+                        allocator.free(param.name);
+                    }
+                    allocator.free(d.params);
+                },
+            }
+        }
+
         pub fn shiftMut(self: *Tag, dist: usize, direction: utils.Direction) void {
             switch (self.*) {
                 .identifier => {},
                 .int => {},
-        
+
                 .decl => |*d| {
                     if (d.ty) |*ty| ty.shiftMut(dist, direction);
                     d.value.shiftMut(dist, direction);
@@ -60,15 +107,16 @@ pub const Instruction = struct {
                 .ret => |*d| {
                     if (d.operand) |*operand| operand.shiftMut(dist, direction);
                 },
-        
+
+                .call => |*d| {
+                    d.callee.shiftMut(dist, direction);
+                    for (d.args) |*arg| arg.shiftMut(dist, direction);
+                },
+
                 .block => |d| {
                     for (d.body) |*body_part| body_part.shiftMut(dist, direction);
                 },
-        
-                .field => |*d| {
-                    if (d.ty) |*ty| ty.shiftMut(dist, direction);
-                    if (d.value) |*value| value.shiftMut(dist, direction);
-                },
+
                 .struct_def => |d| {
                     for (d.decls) |*decl| {
                         if (decl.ty) |*ty| ty.shiftMut(dist, direction);
@@ -78,7 +126,7 @@ pub const Instruction = struct {
                         if (field.ty) |*ty| ty.shiftMut(dist, direction);
                     }
                 },
-        
+
                 .func_def => |*d| {
                     for (d.params) |*param| param.ty.shiftMut(dist, direction);
                     d.ret_ty.shiftMut(dist, direction);
@@ -98,13 +146,13 @@ pub const Lowerer = struct {
             .start = self.instructions.items.len,
             .end = undefined,
         };
-        
+
         switch (node.tag) {
             .identifier => |d| {
                 try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = .{ .identifier = try self.gpa.dupe(u8, d) } });
-            }, 
-            .string => utils.todo(),
-            .char => utils.todo(),
+            },
+            .string => try utils.todoAsError(),
+            .char => try utils.todoAsError(),
             .int => |d| {
                 try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = .{ .int = try self.gpa.dupe(u8, d) } });
             },
@@ -143,6 +191,22 @@ pub const Lowerer = struct {
                 self.instructions.items[result_index].tag = .{ .ret = result };
             },
 
+            .call => |d| {
+                const result_index = self.instructions.items.len;
+                try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
+
+                const result: Instruction.Tag.Call = .{
+                    .callee = try self.lowerNode(d.callee),
+                    .args = try self.gpa.alloc(Span, d.args.len),
+                };
+
+                for (d.args, result.args) |*arg, *out| {
+                    out.* = try self.lowerNode(arg);
+                }
+
+                self.instructions.items[result_index].tag = .{ .call = result };
+            },
+
             .block => |d| {
                 const result_index = self.instructions.items.len;
                 try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
@@ -159,7 +223,7 @@ pub const Lowerer = struct {
             },
 
             .struct_def => |d| {
-                if (d.fields.len != 0) utils.todo();
+                if (d.fields.len != 0) try utils.todoAsError();
                 const result_index = self.instructions.items.len;
                 try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
 
@@ -179,8 +243,8 @@ pub const Lowerer = struct {
             .field => unreachable,
 
             .func_def => |d| {
-                if (d.params.len != 0) utils.todo();
-                
+                if (d.params.len != 0) try utils.todoAsError();
+
                 const result_index = self.instructions.items.len;
                 try self.instructions.append(self.gpa, .{ .loc = node.loc, .tag = undefined });
 
@@ -210,7 +274,7 @@ pub fn lowerFile(code: [:0]const u8, file_path: []const u8, file_node: *ASTNode,
         .gpa = gpa,
     };
 
-    _ = code; 
+    _ = code;
     _ = file_path;
 
     _ = try lowerer.lowerNode(file_node);

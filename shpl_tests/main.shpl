@@ -20,9 +20,11 @@
 // let muu #subst @min @"let" "str" 'char' 52
 // 67+67+677+677 == 1488
 
+let @"main" = func() void {
+    foo();
+    foo();
+};
+
 let foo = func() void {};
 
-let @"main" = func() void {
-    let muu: usize = 0;
-    muu = 6;
-};
+// let tmp = func(param1 ty1, param2 ty2; ret_ty) {};

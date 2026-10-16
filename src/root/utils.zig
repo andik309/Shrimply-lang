@@ -58,21 +58,21 @@ pub const Span = struct {
         return self.end>=self.start;
     }
 
-    pub fn withLen1(pos: usize) Span { 
+    pub fn withLen1(pos: usize) Span {
         return .{ .start = pos, .end = pos+1 };
     }
 
     pub fn shiftMut(self: *Span, value: usize, direction: Direction) void {
         const op = direction.to_op();
 
-        self.start = op(self.start, value); 
-        self.end = op(self.end, value); 
+        self.start = op(self.start, value);
+        self.end = op(self.end, value);
     }
 };
 
-pub const Direction = enum { 
+pub const Direction = enum {
     forward, backward,
-    
+
     pub fn to_op(self: Direction) *const fn(usize, usize) usize {
         return switch (self) {
             .forward => &add,
@@ -107,16 +107,16 @@ pub fn highlightCode(code: [:0]const u8, file_path: []const u8, span: Span, comp
         const code_region_start = getLineStartEndUsingPos(code, span.start);
         const code_region_end = getLineStartEndUsingPos(code, span.end-1);
 
-        if      (start_row_col.row == end_row_col.row and start_row_col.col == end_row_col.col) std.debug.print("{s}:{}:{} - ", .{ file_path, start_row_col.row, start_row_col.col })
-        else if (start_row_col.row == end_row_col.row and start_row_col.col != end_row_col.col) std.debug.print("{s}:{}:[{}-{}] - ", .{ file_path, start_row_col.row, start_row_col.col, end_row_col.col })
-        else                                                                                    std.debug.print("{s}:[{}:{}-{}:{}] - ", .{ file_path, start_row_col.row, start_row_col.col, end_row_col.row, end_row_col.col });
+        if      (start_row_col.row == end_row_col.row and start_row_col.col == end_row_col.col) std.debug.print("{s}:{}:{} - ", .{ file_path, start_row_col.row+1, start_row_col.col+1 })
+        else if (start_row_col.row == end_row_col.row and start_row_col.col != end_row_col.col) std.debug.print("{s}:{}:[{}-{}] - ", .{ file_path, start_row_col.row+1, start_row_col.col+1, end_row_col.col+1 })
+        else                                                                                    std.debug.print("{s}:[{}:{}-{}:{}] - ", .{ file_path, start_row_col.row+1, start_row_col.col+1, end_row_col.row+1, end_row_col.col+1 });
 
         std.debug.print(fmt++"\n", args);
         std.debug.print("{s}\n", .{ code[code_region_start.start..code_region_end.end] });
 
         for (0..span.start-code_region_start.start) |_| std.debug.print(" ", .{});
         for (span.start..span.end) |i| std.debug.print("^{s}", .{ if (code[i] == '\n' and i != span.end-1) "\n" else "" });
-        std.debug.print("\n\n", .{});
+        std.debug.print("\n", .{});
     }
 }
 
@@ -125,9 +125,9 @@ pub fn getLineStartEndUsingPos(code: [:0]const u8, pos: usize) Span {
 }
 
 pub fn getRowColUsingPos(code: [:0]const u8, pos: usize) struct { row: usize, col: usize } {
-    return .{ 
-        .row = std.mem.countScalar(u8, code[0..pos], '\n'), 
-        .col = pos - if (std.mem.findScalarLast(u8, code[0..pos], '\n')) |i| i+1 else 0 
+    return .{
+        .row = std.mem.countScalar(u8, code[0..pos], '\n'),
+        .col = pos - if (std.mem.findScalarLast(u8, code[0..pos], '\n')) |i| i+1 else 0
     };
 }
 
@@ -196,4 +196,9 @@ pub fn formatRawString(self: []const u8, writer: *std.Io.Writer) std.Io.Writer.E
 
 
 
-pub fn todo() noreturn { std.debug.panic("todo", .{}); }
+pub const TodoError = error {
+    Todo,
+};
+
+pub fn todoAsPanic() noreturn { std.debug.panic("todo", .{}); }
+pub fn todoAsError() TodoError!void { return error.Todo; }

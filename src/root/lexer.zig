@@ -18,12 +18,12 @@ pub const Token = struct {
 
         @"builtin @min",
         @"builtin @max",
-        
-        @"macro #alignOf",
-        @"macro #sizeOf",
-        
-        @"macro #subst",
-        @"macro #import",
+
+        @"macros #alignOf",
+        @"macros #sizeOf",
+
+        @"macros #subst",
+        @"macros #import",
 
         @"keyword struct",
         @"keyword func",
@@ -138,10 +138,10 @@ pub const Token = struct {
             break :generating_map map;
         };
 
-        pub const stringToMacroTagMap = generating_map: {
+        pub const stringToMacrosTagMap = generating_map: {
             const kw_count = counting_kw: {
                 var keyword_count = 0;
-                for (@typeInfo(Tag).@"enum".fields) |field| if (std.mem.startsWith(u8, field.name, "macro ")) {
+                for (@typeInfo(Tag).@"enum".fields) |field| if (std.mem.startsWith(u8, field.name, "macros ")) {
                     keyword_count += 1;
                 };
                 break :counting_kw keyword_count;
@@ -150,8 +150,8 @@ pub const Token = struct {
             var kvs: [kw_count]struct { []const u8, Tag } = undefined;
             var curr_kv = 0;
 
-            for (@typeInfo(Tag).@"enum".fields) |field| if (std.mem.startsWith(u8, field.name, "macro ")) {
-                kvs[curr_kv].@"0" = field.name["macro ".len..];
+            for (@typeInfo(Tag).@"enum".fields) |field| if (std.mem.startsWith(u8, field.name, "macros ")) {
+                kvs[curr_kv].@"0" = field.name["macros ".len..];
                 kvs[curr_kv].@"1" = @enumFromInt(field.value);
                 curr_kv += 1;
             };
@@ -165,7 +165,7 @@ pub const Token = struct {
 pub const Lexer = struct {
     code: [:0]const u8,
     file_path: []const u8,
-    
+
     pos: usize = 0,
 
     pub const State = enum {
@@ -572,7 +572,7 @@ pub const Lexer = struct {
                     else => {
                         if (Token.Tag.stringToKeywordTagMap.get(self.code[result.loc.start..self.pos])) |kw| result.tag = kw;
                         if (Token.Tag.stringToBuiltinTagMap.get(self.code[result.loc.start..self.pos])) |bi| result.tag = bi;
-                        if (Token.Tag.stringToMacroTagMap.get(self.code[result.loc.start..self.pos])) |m| result.tag = m;
+                        if (Token.Tag.stringToMacrosTagMap.get(self.code[result.loc.start..self.pos])) |m| result.tag = m;
                     },
                 }
             },
@@ -702,10 +702,11 @@ pub const HighlightingSettings = enum {
 };
 
 pub fn lexFile(code: [:0]const u8, file_path: []const u8, gpa: std.mem.Allocator, highlighting_settings: HighlightingSettings) ![]Token {
-    var lexer = Lexer{ 
+    var lexer = Lexer{
         .code = code,
         .file_path = file_path,
     };
+
     var result: std.ArrayList(Token) = .empty;
     errdefer result.deinit(gpa);
 

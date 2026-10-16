@@ -5,18 +5,25 @@ const parser = @import("parser.zig");
 const lowerer = @import("lowerer.zig");
 const utils = @import("utils.zig");
 
-const Span = @import("utils.zig").Span;
-const Instruction = @import("lowerer.zig").Instruction;
+const Span = utils.Span;
+const Instruction = lowerer.Instruction;
+
+// namespaced types - struct, enum, union (can contain StaticDecls)
 
 
 
 pub const TypeInfo = union(enum) {
     @"int": Int,
-    @"void": void,
 
+    @"int_literal": void,
     @"type": void,
 
+    @"void": void,
+    @"noreturn": void,
+
     @"struct": Struct,
+
+    @"func": Func,
 
     pub const Int = struct {
         bits: u16,
@@ -25,14 +32,25 @@ pub const TypeInfo = union(enum) {
         pub const Signedness = enum(u1) { signed = 0, unsigned = 1 };
 
 
+        pub fn fromZigIntType(comptime T: type) Int {
+            const info = @typeInfo(T).@"int";
+
+            return .{
+                .bits = info.bits,
+                .signedness = switch (info.signedness) {
+                    .signed => .signed,
+                    .unsigned => .unsigned,
+                },
+            };
+        }
     };
 
     pub const Struct = struct {
-        /// pos in instructions where it was defined,
+        /// pos in Inliner.instructions where it was defined,
         /// its used for `eql` function
         source: usize,
 
-        inlined_decls: []InlinedDecls,
+        parent: DeclsParent,
         decls: []StaticDecl,
 
         // fields: []const Field,
@@ -42,12 +60,13 @@ pub const TypeInfo = union(enum) {
         pub fn deinit(self: Struct, allocator: std.mem.Allocator) void {
             for (self.decls) |decl| decl.deinit(allocator);
             allocator.free(self.decls);
+        }
 
-            for (self.inlined_decls) |inlined_decl| inlined_decl.deinit(allocator);
-            allocator.free(self.inlined_decls);
+        pub fn getDeclByName(self: Struct, name: []const u8) ?StaticDecl {
+            for (self.decls) |decl| if (std.mem.eql(u8, decl.name, name)) return decl;
+            return null;
         }
     };
-
     pub const StaticDecl = struct {
         name: []const u8, static_value_index: usize,
 
@@ -56,78 +75,197 @@ pub const TypeInfo = union(enum) {
         }
     };
 
+    pub const Func = struct {
+        param_tys: []u32,
+        ret_ty: u32,
+
+        pub fn deinit(self: Func, allocator: std.mem.Allocator) void {
+            allocator.free(self.param_tys);
+        }
+
+        pub fn eql(self: Func, other: Func) bool {
+            if (self.ret_ty != other.ret_ty) return false;
+
+            if (self.param_tys.len != other.param_tys.len) return false;
+            for (self.param_tys, other.param_tys) |self_param_ty, other_param_ty| if (self_param_ty != other_param_ty) return false;
+
+            return true;
+        }
+    };
+
+
     pub fn deinit(self: TypeInfo, allocator: std.mem.Allocator) void {
         switch (self) {
             .@"int" => {},
-            .@"void" => {},
 
+            .@"int_literal" => {},
             .@"type" => {},
 
+            .@"void" => {},
+            .@"noreturn" => {},
+
             .@"struct" => |d| d.deinit(allocator),
+
+            .@"func" => |d| allocator.free(d.param_tys),
         }
     }
 };
-pub const InlinedDecls = union(enum) {
-    /// index of namespaced type
-    static_decls: usize,
-    // subst_params: []const struct{ name: []const u8, ValueContainer },
+pub const DeclsParent = union(enum) {
+    /// for imported structs
+    none,
 
-    pub fn deinit(self: InlinedDecls, allocator: std.mem.Allocator) void {
-        _ = allocator;
+    /// index of type in pool
+    ty: u32,
 
-        switch (self) {
-            .static_decls => {},
+    // ///               struct { `index`, `call index` }
+    // subst_macro_call: struct {  usize,      usize    },
+
+    pub fn getDecl(self: DeclsParent, inliner: Inliner, decl_name: []const u8) ?DeclInfo {
+        step: switch (self) {
+            .none => return null,
+            .ty => |d| {
+                switch (inliner.pool.get(d)) {
+                    .@"struct" => |struct_d| {
+                        if (struct_d.getDeclByName(decl_name)) |muu| return .{ .static_value = muu.static_value_index };
+                        continue :step struct_d.parent;
+                    },
+                    else => unreachable,
+                }
+            },
         }
     }
 };
+pub const DeclInfo = union(enum) {
+    static_value: usize,
+};
+
+// maybe i'll switch to it later
+// pub const TypeIndex = packed struct {
+//     index: u30,
+//     ownership: Ownership,
+//
+//     pub const Ownership = enum(u2) {
+//         not_owned,
+//
+//         owned,
+//         owned_mut,
+//     };
+// };
 
 
 
 pub const TypePool = struct {
-    pool: std.ArrayList(PoolTypeInfo),
+    pool: std.ArrayList(PoolItem),
 
-    // self owns the result
+    pub const indexOfFirstPoolItem: u32 = 131076;
+
+    pub fn deinit(self: *TypePool, allocator: std.mem.Allocator) void {
+        for (self.pool.items) |pool_item| {
+            switch (pool_item) {
+                .@"struct" => |d| {
+                    d.deinit(allocator);
+                },
+                .@"func" => |d| {
+                    d.deinit(allocator);
+                },
+            }
+        }
+        self.pool.deinit(allocator);
+    }
+
+    /// self owns the result
     pub fn get(self: TypePool, index: u32) TypeInfo {
         return switch (index) {
             0...65535      => .{ .@"int" = .{ .bits = @truncate(index-0),     .signedness = .signed   } },
             65536...131071 => .{ .@"int" = .{ .bits = @truncate(index-65536), .signedness = .unsigned } },
-            131072 => .@"void",
+
+            131072 => .@"int_literal",
+
             131073 => .@"type",
 
+            131074 => .@"void",
+            131075 => .@"noreturn",
+
             else => {
-                switch (self.pool.items[index-131074]) {
+                switch (self.pool.items[index-131076]) {
                     .@"struct" => |d| return .{ .@"struct" = d },
+                    .@"func" => |d| return .{ .@"func" = d },
                 }
             },
         };
     }
 
-    // callee owns `info`
+    /// callee owns `info`
     pub fn put(self: *TypePool, info: TypeInfo, gpa: std.mem.Allocator) !u32 {
         switch (info) {
             .@"int" => |d| return @as(u32, @intFromEnum(d.signedness))*65536 + @as(u32, d.bits),
-            .@"void" => return 131072,
+
+            .@"int_literal" => return 131072,
 
             .@"type" => return 131073,
 
+            .@"void" => return 131074,
+            .@"noreturn" => return 131075,
+
             .@"struct" => |d| {
-                for (self.pool.items, 0..) |pool_type_info, i| {
+                for (self.pool.items, 131076..) |pool_type_info, i| {
                     if (pool_type_info == .@"struct" and d.source == pool_type_info.@"struct".source) {
-                        info.deinit(gpa);
+                        d.deinit(gpa);
                         return @truncate(i);
                     }
                 }
 
-                const result = self.pool.items.len;
+                const result = self.pool.items.len+131076;
 
                 try self.pool.append(gpa, .{ .@"struct" = d });
                 return @truncate(result);
             },
+
+            .@"func" => |d| {
+                for (self.pool.items, 131076..) |pool_type_info, i| {
+                    if (pool_type_info == .@"func" and
+                        d.ret_ty == pool_type_info.@"func".ret_ty
+                        and std.mem.eql(u32, d.param_tys, pool_type_info.@"func".param_tys)
+                    ) {
+                        d.deinit(gpa);
+                        return @truncate(i);
+                    }
+                }
+
+                const result = self.pool.items.len+131076;
+
+                try self.pool.append(gpa, .{ .@"func" = d });
+                return @truncate(result);
+            }
         }
     }
 
-    pub const PoolTypeInfo = union(enum) {
+    /// works only on TypeInfos that dont require pool to exist
+    pub fn getStatic(info: TypeInfo) u32 {
+        return switch (info) {
+            .@"int" => |d| return @as(u32, @intFromEnum(d.signedness))*65536 + @as(u32, d.bits),
+
+            .@"int_literal" => return 131072,
+
+            .@"type" => return 131073,
+
+            .@"void" => return 131074,
+            .@"noreturn" => return 131075,
+
+            inline else => |_, tag| {
+                if (@inComptime()) {
+                    @compileError("TypeInfo " ++ @tagName(tag) ++ " requires pool to exist");
+                } else {
+                    std.debug.panic("TypeInfo {s} requires pool to exist", .{ @tagName(tag) });
+                }
+            },
+        };
+    }
+
+
+    pub const PoolItem = union(enum) {
         @"struct": TypeInfo.Struct,
+        @"func": TypeInfo.Func,
     };
 };
 pub const Inliner = struct {
@@ -136,196 +274,842 @@ pub const Inliner = struct {
     gpa: std.mem.Allocator,
 
     pool: TypePool = .{ .pool = .empty },
+    cached_files: std.ArrayList(struct { file_path: []const u8, file_code: [:0]const u8, type_index: u32, span: Span }) = .empty,
+
     static_values: std.ArrayList(StaticValue) = .empty,
-    cached_files: std.ArrayList(struct { file_path: []const u8, file_code: []const u8, type_index: u32, span: Span }) = .empty,
+    func_defs: std.ArrayList(FuncDef) = .empty,
+    // subst_macroses: 0,
 
     instructions: std.ArrayList(Instruction) = .empty,
+    instructions__source_locs: std.ArrayList(InstructionsSourceLoc) = .empty,
 
-    pub const StaticValue = union(enum) {
-        unevaluated: struct { ty: ?Span, value: Span },
-        evaluated: ValueContainer,
+    instructions__label_infos: std.AutoHashMap(usize, LabelInfo),
+
+
+    pub const InstructionsSourceLoc = struct {
+        instructions: Span,
+        file_index: usize,
     };
 
-    pub fn deinit(self: Inliner) void {
-        self.cwd.close(self.io);
-        // utils.todo();
-    }
+    pub const LabelInfo = struct {
+        name: []const u8,
 
-    pub fn import(self: *Inliner, file_path: []const u8) !u32 {
-        for (self.cached_files.items) |cached_file| if (std.mem.eql(u8, file_path, cached_file.file_path)) return cached_file.type_index;
+        breaks_at: std.ArrayList(usize),
+        // continues_at: std.ArrayList(usize),
 
+        pub fn deinit(self: *LabelInfo, allocator: std.mem.Allocator) void {
+            allocator.free(self.name);
+            self.breaks_at.deinit(allocator);
+        }
+    };
 
-        const file_code = try self.cwd.readFileAllocOptions(self.io, file_path, self.gpa, .unlimited, .fromByteUnits(@alignOf(u8)), 0);
+    pub const StaticValue = struct{
+        parent_ty: u32,
+        value: Value,
 
-        const file_tokens = try lexer.lexFile(file_code, "<unknown>", self.gpa, .only_invalid);
-
-        const file_node, var arena = try parser.parseFile(file_code, file_tokens, "<unknown>", self.gpa);
-        self.gpa.free(file_tokens);
-
-        const file_ir = try lowerer.lowerFile(file_code, "<unknown>", file_node, self.gpa);
-        _ = arena.reset(.free_all);
-
-
-        var instructions_span: Span = .{ .start = self.instructions.items.len, .end = undefined };
-        for (file_ir) |*instr| instr.tag.shiftMut(instructions_span.start, .forward);
-        try self.instructions.appendSlice(self.gpa, file_ir);
-        instructions_span.end = self.instructions.items.len;
-        self.gpa.free(file_ir);
-
-
-        var it_interpretator: InlineTimeInterpretator = .{
-            .inliner = self,
+        pub const Value = union(enum) {
+            unevaluated: struct { ty: ?Span, value: Span },
+            evaluated: ValueContainer,
         };
 
-        try it_interpretator.jobs.append(it_interpretator.inliner.gpa, .{
-            .parent = 0,
-            .specific = .{ .start = .{} }
-        });
-        try it_interpretator.jobs.append(it_interpretator.inliner.gpa, .{
-            .parent = 0,
-            .specific = .{ .compute = .{
-                .index = instructions_span.start,
-            } }
-        });
-
-        var type_index: ValueContainer = undefined;
-        defer type_index.deinit(self.gpa);
-
-        while (true) {
-            try it_interpretator.step();
-
-            switch (it_interpretator.jobs.getLast().specific) {
-                .start => |d| { type_index = d.result; break; },
-                else => {},
+        pub fn deinit(self: StaticValue, allocator: std.mem.Allocator) void {
+            switch (self.value) {
+                .unevaluated => {},
+                .evaluated => |d| d.deinitFull(allocator),
             }
         }
+    };
 
-        const result = type_index.toInt(u32) catch unreachable;
+    pub const FuncDef = struct {
+        params: []Param,
+        ret_ty: u32,
+        body: Span,
 
-        try self.cached_files.append(self.gpa, .{
-            .file_path = try self.gpa.dupe(u8, file_path),
-            .file_code = file_code,
-            .type_index = result,
-            .span = instructions_span,
-        });
+        parent: DeclsParent,
 
-        return result;
+        checked: bool = false,
+
+        pub const Param = struct { name: []const u8, ty: u32 };
+
+
+        pub fn deinit(self: FuncDef, allocator: std.mem.Allocator) void {
+            for (self.params) |param| {
+                allocator.free(param.name);
+            }
+            allocator.free(self.params);
+        }
+
+        pub fn getTypeInfo(self: FuncDef, allocator: std.mem.Allocator) !TypeInfo {
+            const result: TypeInfo.Func = .{
+                .param_tys = try allocator.alloc(u32, self.params.len),
+                .ret_ty = self.ret_ty,
+            };
+
+            for (self.params, result.param_tys) |param, *out| {
+                out.* = param.ty;
+            }
+
+            return .{ .@"func" = result };
+        }
+
+
+    };
+
+
+    pub fn deinit(self: *Inliner) void {
+        self.cwd.close(self.io);
+
+
+        for (self.instructions.items) |instruction| {
+            instruction.tag.deinit(self.gpa);
+        }
+        self.instructions.deinit(self.gpa);
+
+        self.instructions__source_locs.deinit(self.gpa);
+
+
+        for (self.cached_files.items) |cached_file| {
+            self.gpa.free(cached_file.file_code);
+            self.gpa.free(cached_file.file_path);
+        }
+        self.cached_files.deinit(self.gpa);
+
+
+        self.pool.deinit(self.gpa);
+
+
+        for (self.static_values.items) |static_value| {
+            static_value.deinit(self.gpa);
+        }
+        self.static_values.deinit(self.gpa);
+
+
+        for (self.func_defs.items) |func_def| {
+            func_def.deinit(self.gpa);
+        }
+        self.func_defs.deinit(self.gpa);
+    }
+
+    pub fn getFileIndexByInstructionIndex(self: *Inliner, instruction_index: usize) error{ InstructionIndexIsNotRegistered }!usize {
+        for (self.instructions__source_locs.items) |source_loc| {
+            if (source_loc.instructions.start <= instruction_index and instruction_index < source_loc.instructions.end) return source_loc.file_index;
+        }
+
+        return error.InstructionIndexIsNotRegistered;
     }
 };
 pub const InlineTimeInterpretator = struct {
     inliner: *Inliner,
-    jobs: std.ArrayList(Job) = .empty,
+    jobs: std.ArrayList(*Job) = .empty,
+
 
     pub const Job = struct {
-        parent: usize,
-        specific: Specific,
+        parent: ?*Job,
+        values: std.ArrayList(ValueContainer) = .empty,
+        specific: JobSpecific,
 
-        pub const Specific = union(enum) {
-            start: Start,
-            compute: Compute,
 
-            pub const Start = struct {
-                result: ValueContainer = undefined,
-            };
+        pub fn deinit(self: *Job, allocator: std.mem.Allocator) void {
+            for (self.values.items) |value| value.deinitFull(allocator);
+            self.values.deinit(allocator);
 
-            pub const Compute = struct {
-                values: std.ArrayList(ValueContainer) = .empty,
-                index: usize,
+            self.specific.deinit(allocator);
+        }
 
-                state: State = .asking_for_values,
-
-                pub const State = union(enum) {
-                    asking_for_values,
-                    computing,
-                };
-            };
-        };
+        pub fn step(self: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+            try self.specific.step(self, it_interpretator);
+        }
     };
 
-    pub fn step(self: *InlineTimeInterpretator) !void {
-        const job_index = self.jobs.items.len-1;
+    pub const JobSpecific = union(enum) {
+        start: Start,
 
-        switch (self.jobs.items[job_index].specific) {
-            .start => {
-                _ = self.jobs.pop();
-            },
+        compute: Compute,
+        compute_ty: ComputeType,
+        drop: Drop,
 
-            .compute => |*d| {
-                const instruction = self.inliner.instructions.items[d.index];
+        get_member: GetMember,
+        get_static_value: GetStaticValue, // long jump
 
-                switch (d.state) {
-                    .asking_for_values => {
-                        switch (instruction.tag) {
-                            .identifier => utils.todo(),
-                            .int => utils.todo(),
+        ty_check_func_body: TypeCheckFuncBody, // long jump
 
-                            .decl => utils.todo(),
-                            .assign => utils.todo(),
-                            .ret => utils.todo(),
+        import: Import, // long jump
 
-                            .block => utils.todo(),
 
-                            .field => utils.todo(),
-                            .struct_def => {
-                                d.state = .computing;
+        pub const Start = struct {
+            pub fn step(self: *Start, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+                _ = &self;
+                _ = &job;
+                _ = &it_interpretator;
+
+                return try utils.todoAsError();
+            }
+        };
+
+        pub const Compute = struct {
+            index: usize,
+            state: State = .start,
+
+            pub const State = enum {
+                start,
+                asking_for_values,
+                computing,
+            };
+
+            pub fn step(self: *Compute, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+                const gpa = it_interpretator.inliner.gpa;
+                const instruction = it_interpretator.inliner.instructions.items[self.index];
+
+                switch (self.state) {
+                    .start => {
+                        self.state = .asking_for_values;
+                    },
+                    .asking_for_values => switch (instruction.tag) {
+                        .struct_def => {
+                            self.state = .computing;
+                        },
+
+                        .func_def => |d| {
+                            for (d.params) |param_d| {
+                                _ = try it_interpretator.appendJob(.{
+                                    .parent = job,
+                                    .specific = .{ .compute = .{
+                                        .index = param_d.ty.start,
+                                    } },
+                                });
+                            }
+
+                            _ = try it_interpretator.appendJob(.{
+                                .parent = job,
+                                .specific = .{ .compute = .{
+                                    .index = d.ret_ty.start,
+                                } },
+                            });
+
+                            self.state = .computing;
+                        },
+
+                        .identifier => |d| {
+                            if (std.mem.eql(u8, d, "void")) {
+                                try job.values.append(gpa, try .fromType(comptime TypePool.getStatic(.@"void"), gpa));
+                            } else if (it_interpretator.getDeclsParent(job).getDecl(it_interpretator.inliner.*, d)) |decl| {
+                                _ = try it_interpretator.appendJob(.{
+                                    .parent = job,
+                                    .specific = .{ .get_static_value = .{
+                                        .index = decl.static_value
+                                    } }
+                                });
+                            } else {
+                                const file_index = try it_interpretator.inliner.getFileIndexByInstructionIndex(self.index);
+
+                                const file_code = it_interpretator.inliner.cached_files.items[file_index].file_code;
+                                const file_path = it_interpretator.inliner.cached_files.items[file_index].file_path;
+
+                                const code_span = instruction.loc;
+
+                                utils.highlightCode(file_code, file_path, code_span, "error: use of undeclarated identifier `{f}`", .{ std.fmt.Alt([]const u8, utils.formatRawString){ .data = d } });
+                                return error.UseOfUndeclaratedIdentifier;
+                            }
+
+                            self.state = .computing;
+                        },
+
+                        inline else => |_, tag| {
+                            std.debug.print("todo: {s}\n", .{ @tagName(tag) });
+                            try utils.todoAsError();
+                        },
+                    },
+                    .computing => switch (instruction.tag) {
+                        .struct_def => |d| {
+                            if (d.fields.len != 0) try utils.todoAsError();
+
+                            const result: TypeInfo.Struct = .{
+                                .source = self.index,
+
+                                .decls = try gpa.alloc(TypeInfo.StaticDecl, d.decls.len),
+                                .parent = .none,
+                            };
+
+                            for (d.decls, result.decls) |decl, *out| {
+                                out.name = try gpa.dupe(u8, decl.name);
+
+                                out.static_value_index = it_interpretator.inliner.static_values.items.len;
+                                try it_interpretator.inliner.static_values.append(gpa, .{ .parent_ty = undefined, .value = .{ .unevaluated = .{
+                                    .ty = decl.ty,
+                                    .value = decl.value,
+                                } } });
+                            }
+
+                            const type_index = try it_interpretator.inliner.pool.put(.{ .@"struct" = result }, gpa);
+
+                            for (it_interpretator.inliner.pool.pool.items[type_index-TypePool.indexOfFirstPoolItem].@"struct".decls) |decl| {
+                                it_interpretator.inliner.static_values.items[decl.static_value_index].parent_ty = type_index;
+                            }
+
+                            try job.parent.?.values.append(gpa, try .fromType(type_index, gpa));
+                            it_interpretator.popJob();
+                        },
+
+                        .func_def => |d| {
+                            var result: Inliner.FuncDef = .{
+                                .params = try gpa.alloc(Inliner.FuncDef.Param, d.params.len),
+                                .ret_ty = undefined,
+
+                                .parent = it_interpretator.getDeclsParent(job),
+
+                                .body = d.body,
+                            };
+
+                            for (d.params, result.params) |param, *out| {
+                                out.name = try gpa.dupe(u8, param.name);
+                                out.ty = try job.values.pop().?.toTypeDeinitFull(gpa); // TODO checks
+                            }
+                            result.ret_ty = try job.values.pop().?.toTypeDeinitFull(gpa); // TODO checks
+
+                            const result_index: u32 = @truncate(it_interpretator.inliner.func_defs.items.len);
+                            try it_interpretator.inliner.func_defs.append(gpa, result);
+
+
+                            const result_ty_index: u32 = try it_interpretator.inliner.pool.put(try result.getTypeInfo(gpa), gpa);
+
+
+                            try job.parent.?.values.append(gpa, (try ValueContainer.fromInt(u32, result_index, gpa)).withTy(result_ty_index));
+                            it_interpretator.popJob();
+                        },
+
+                        .identifier => {
+                            try job.parent.?.values.append(gpa, job.values.pop().?);
+                            it_interpretator.popJob();
+                        },
+
+                        inline else => |_, tag| {
+                            std.debug.print("todo: {s}\n", .{ @tagName(tag) });
+                            try utils.todoAsError();
+                        },
+                    },
+                }
+            }
+        };
+        pub const ComputeType = struct {
+            index: usize,
+
+            state: State = .start,
+
+            pub const State = enum {
+                start,
+
+                stage0,
+                stage1,
+
+                returning_value,
+            };
+
+            pub fn step(self: *ComputeType, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+                const gpa = it_interpretator.inliner.gpa;
+                const instruction = it_interpretator.inliner.instructions.items[self.index];
+
+                switch (instruction.tag) {
+                    .struct_def => switch (self.state) {
+                        .start => {
+                            self.state = .stage0;
+                        },
+
+                        .stage0 => {
+                            _ = try it_interpretator.appendJob(.{
+                                .parent = job,
+                                .specific = .{ .compute = .{
+                                    .index = self.index,
+                                } },
+                            });
+
+                            self.state = .returning_value;
+                        },
+
+                        .returning_value => {
+                            const type_index = job.values.pop().?.toTypeDeinitFull(gpa) catch unreachable;
+                            _ = &type_index;
+
+                            try job.parent.?.values.append(gpa, try .fromType(comptime TypePool.getStatic(.@"type"), gpa));
+                            it_interpretator.popJob();
+                        },
+
+                        else => unreachable,
+                    },
+
+                    // .func_def => {},
+
+                    .block => |instruction_d| switch (self.state) {
+                        .start => {
+                            self.state = .stage0;
+                        },
+
+                        .stage0 => {
+                            for (instruction_d.body) |body_part| {
+                                _ = try it_interpretator.appendJob(.{
+                                    .parent = job,
+                                    .specific = .{ .compute_ty = .{
+                                        .index = body_part.start,
+                                    } },
+                                });
+                            }
+
+                            self.state = .stage1;
+                        },
+
+                        .stage1 => {
+                            var is_noreturn = false;
+
+                            for (0..instruction_d.body.len) |i| {
+                                _ = &i; // it will be used for warnings/errors like 'unreachable code' (TODO)
+
+                                switch (job.values.pop().?.toTypeDeinitFull(gpa) catch unreachable) {
+                                    comptime TypePool.getStatic(.@"void") => {},
+                                    comptime TypePool.getStatic(.@"noreturn") => {
+                                        is_noreturn = true;
+                                    },
+
+                                    else => try utils.todoAsError(),
+                                }
+                            }
+
+                            if (is_noreturn) {
+                                try job.values.append(gpa, try .fromType(comptime TypePool.getStatic(.@"noreturn"), gpa));
+                            } else {
+                                try job.values.append(gpa, try .fromType(comptime TypePool.getStatic(.@"void"), gpa));
+                            }
+
+                            self.state = .returning_value;
+                        },
+
+                        .returning_value => {
+                            const type_index = job.values.pop().?.toTypeDeinitFull(gpa) catch unreachable;
+                            _ = &type_index;
+
+                            try job.parent.?.values.append(gpa, try .fromType(comptime TypePool.getStatic(.@"type"), gpa));
+                            it_interpretator.popJob();
+                        },
+                    },
+
+                    .call => |instruction_d| switch (self.state) {
+                        .start => {
+                            self.state = .stage0;
+                        },
+
+                        .stage0 => {
+                            _ = try it_interpretator.appendJob(.{
+                                .parent = job,
+                                .specific = .{ .compute = .{
+                                    .index = instruction_d.callee.start,
+                                } },
+                            });
+
+                            for (instruction_d.args) |arg| {
+                                _ = try it_interpretator.appendJob(.{
+                                    .parent = job,
+                                    .specific = .{ .compute_ty = .{
+                                        .index = arg.start,
+                                    } }
+                                });
+                            }
+
+                            self.state = .stage1;
+                        },
+                        .stage1 => {
+                            const func = job.values.pop().?;
+                            std.debug.assert(it_interpretator.inliner.pool.get(func.ty) == .@"func");
+                            const func_index: u32 = try func.withTy(comptime TypePool.getStatic(.{ .@"int" = .fromZigIntType(u32) })).toIntDeinitFull(u32, gpa);
+
+                            if (it_interpretator.inliner.func_defs.items[func_index].params.len != 0) try utils.todoAsError(); // TODO
+
+                            try job.values.append(gpa, try .fromType(it_interpretator.inliner.func_defs.items[func_index].ret_ty, gpa));
+
+                            self.state = .returning_value;
+                        },
+
+                        .returning_value => {
+                            try job.parent.?.values.append(gpa, job.values.pop().?);
+                            it_interpretator.popJob();
+                        },
+                    },
+
+                    inline else => |_, tag| {
+                        std.debug.print("todo: {s}\n", .{ @tagName(tag) });
+                        try utils.todoAsError();
+                    },
+                }
+            }
+        };
+        pub const Drop = struct {
+            pub fn step(self: *Drop, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+                _ = self;
+                _ = job;
+
+                it_interpretator.popJob();
+            }
+        };
+
+        pub const GetMember = struct {
+            member: []const u8,
+
+            state: State = .start,
+
+            pub const State = enum {
+                start,
+
+                checking_ty_of_operand,
+
+                type__computing_member,
+
+                returning_result,
+            };
+
+            pub fn step(self: *GetMember, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+                const gpa = it_interpretator.inliner.gpa;
+
+                switch (self.state) {
+                    .start => {
+                        if (job.values.getLast().ty == comptime TypePool.getStatic(.@"type")) {
+                            self.state = .checking_ty_of_operand;
+                        } else {
+                            try utils.todoAsError();
+                        }
+                    },
+
+                    .checking_ty_of_operand => {
+                        self.state = .type__computing_member;
+                    },
+
+                    .type__computing_member => {
+                        const index = try job.values.pop().?.toTypeDeinitFull(gpa);
+                        const ty = it_interpretator.inliner.pool.get(index);
+
+                        const d: TypeInfo.Struct = switch (ty) {
+                            .@"struct" => |d| d,
+                            else => { try utils.todoAsError(); unreachable; },
+                        };
+
+                        const static_value_index = (d.getDeclByName(self.member) orelse return error.NoSuchDecl).static_value_index;
+
+                        _ = try it_interpretator.appendJob(.{
+                            .parent = job,
+                            .specific = .{ .get_static_value = .{
+                                .index = static_value_index,
+                            } },
+                        });
+
+                        self.state = .returning_result;
+                    },
+
+                    .returning_result => {
+                        try job.parent.?.values.append(gpa, job.values.pop().?);
+                        it_interpretator.popJob();
+                    },
+                }
+            }
+        };
+        pub const GetStaticValue = struct {
+            index: usize,
+
+            state: State = .start,
+
+            pub const State = union(enum) {
+                start,
+                checking_if_evaluated,
+                // computing_type,
+                computing_value,
+                // coercing_value,
+                saving_value,
+                returning_value,
+            };
+
+
+            pub fn step(self: *GetStaticValue, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+                _ = &self;
+                _ = &job;
+                _ = &it_interpretator;
+
+                const gpa = it_interpretator.inliner.gpa;
+
+                switch (self.state) {
+                    .start => {
+                        self.state = .checking_if_evaluated;
+                    },
+                    .checking_if_evaluated => {
+                        switch (it_interpretator.inliner.static_values.items[self.index].value) {
+                            .evaluated => |value| {
+                                self.state = .returning_value;
+                                try job.values.append(gpa, try value.clone(gpa));
                             },
+                            .unevaluated => {
+                                self.state = .computing_value;
+                            },
+                        }
+                    },
+                    // .computing_type,
+                    .computing_value => {
+                        _ = try it_interpretator.appendJob(.{ .parent = job, .specific = .{ .compute = .{
+                            .index = it_interpretator.inliner.static_values.items[self.index].value.unevaluated.value.start,
+                        } } });
 
-                            .func_def => utils.todo(),
+                        self.state = .saving_value;
+                    },
+                    // .coercing_value,
+                    .saving_value => {
+                        it_interpretator.inliner.static_values.items[self.index].value = .{ .evaluated = try job.values.getLast().clone(gpa) };
+
+                        self.state = .returning_value;
+                    },
+                    .returning_value => {
+                        try job.parent.?.values.append(gpa, job.values.pop().?);
+                        it_interpretator.popJob();
+                    },
+                }
+            }
+        };
+
+        pub const TypeCheckFuncBody = struct {
+            state: State = .start,
+            func_index: u32 = undefined,
+
+            pub const State = union(enum) {
+                start,
+                checking_if_not_checked,
+                returning_result,
+            };
+
+            pub fn step(self: *TypeCheckFuncBody, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+                _ = &self;
+                _ = &job;
+                _ = &it_interpretator;
+
+                const gpa = it_interpretator.inliner.gpa;
+
+                switch (self.state) {
+                    .start => {
+                        self.state = .checking_if_not_checked;
+                    },
+                    .checking_if_not_checked => {
+                        const value = job.values.getLast();
+                        std.debug.assert(it_interpretator.inliner.pool.get(value.ty) == .@"func");
+
+                        self.func_index = try value.withTy(comptime TypePool.getStatic(.{ .@"int" = .fromZigIntType(u32) })).toInt(u32);
+
+                        const job1 = try it_interpretator.appendJob(.{
+                            .parent = job,
+                            .specific = .{ .drop = .{} },
+                        });
+
+                        _ = try it_interpretator.appendJob(.{
+                            .parent = job1,
+                            .specific = .{ .compute_ty = .{
+                                .index = it_interpretator.inliner.func_defs.items[self.func_index].body.start,
+                            } },
+                        });
+
+                        self.state = .returning_result;
+                    },
+                    .returning_result => {
+                        try job.parent.?.values.append(gpa, job.values.pop().?);
+                        it_interpretator.popJob();
+                    },
+                }
+            }
+        };
+
+        pub const Import = struct {
+            file_path: []const u8,
+
+            state: State = .start,
+            cached_file_index: usize = undefined,
+
+            pub const State = enum {
+                start,
+
+                checking_if_cached,
+
+                computing,
+                continuing_computing,
+
+                returning,
+            };
+
+            pub fn step(self: *Import, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+                const gpa = it_interpretator.inliner.gpa;
+
+                switch (self.state) {
+                    .start => {
+                        self.state = .checking_if_cached;
+                    },
+
+                    .checking_if_cached => {
+                        var cached = false;
+                        for (it_interpretator.inliner.cached_files.items) |cached_file| {
+                            if (std.mem.eql(u8, self.file_path, cached_file.file_path)) {
+                                try job.values.append(it_interpretator.inliner.gpa, try .fromType(cached_file.type_index, it_interpretator.inliner.gpa));
+
+                                cached = true;
+                                self.state = .returning;
+
+                                break;
+                            }
+                        }
+
+                        if (!cached) {
+                            self.state = .computing;
                         }
                     },
 
                     .computing => {
-                        switch (instruction.tag) {
-                            .identifier => utils.todo(),
-                            .int => utils.todo(),
+                        const file_code = try it_interpretator.inliner.cwd.readFileAllocOptions(it_interpretator.inliner.io, self.file_path, it_interpretator.inliner.gpa, .unlimited, .of(u8), 0);
+                        errdefer it_interpretator.inliner.gpa.free(file_code);
 
-                            .decl => utils.todo(),
-                            .assign => utils.todo(),
-                            .ret => utils.todo(),
+                        const instructions_span = blk0: {
+                            const file_ir = blk1: {
+                                const file_tokens = try lexer.lexFile(file_code, self.file_path, it_interpretator.inliner.gpa, .only_invalid);
+                                defer it_interpretator.inliner.gpa.free(file_tokens);
 
-                            .block => utils.todo(),
+                                const file_node, var arena = try parser.parseFile(file_code, file_tokens, self.file_path, it_interpretator.inliner.gpa);
+                                defer _ = arena.reset(.free_all);
 
-                            .field => utils.todo(),
-                            .struct_def => |instruction_d| {
-                                if (instruction_d.fields.len != 0) utils.todo();
+                                const file_ir = try lowerer.lowerFile(file_code, self.file_path, file_node, it_interpretator.inliner.gpa);
 
-                                const result: TypeInfo.Struct = .{
-                                    .source = d.index,
-                                    .decls = try self.inliner.gpa.alloc(TypeInfo.StaticDecl, instruction_d.decls.len),
-                                    .inlined_decls = try self.inliner.gpa.alloc(InlinedDecls, 0), // utils.todo();
-                                };
-
-                                for (instruction_d.decls, result.decls) |decl, *out| {
-                                    out.name = try self.inliner.gpa.dupe(u8, decl.name);
-
-                                    out.static_value_index = self.inliner.static_values.items.len;
-                                    try self.inliner.static_values.append(self.inliner.gpa, .{ .unevaluated = .{ .ty = decl.ty, .value = decl.value } });
+                                break :blk1 file_ir;
+                            };
+                            errdefer {
+                                for (file_ir) |instruction| {
+                                    instruction.tag.deinit(it_interpretator.inliner.gpa);
                                 }
+                                it_interpretator.inliner.gpa.free(file_ir);
+                            }
 
-                                const type_index = try self.inliner.pool.put(.{ .@"struct" = result }, self.inliner.gpa);
+                            for (file_ir) |*instr| instr.tag.shiftMut(it_interpretator.inliner.instructions.items.len, .forward);
 
-                                try self.putValueToParentJob(self.jobs.items[job_index].parent, try .fromInt(u32, type_index, self.inliner.gpa));
 
-                                _ = self.jobs.pop();
-                            },
+                            var instructions_span: Span = .{ .start = it_interpretator.inliner.instructions.items.len, .end = undefined };
+                            try it_interpretator.inliner.instructions.appendSlice(it_interpretator.inliner.gpa, file_ir);
+                            instructions_span.end = it_interpretator.inliner.instructions.items.len;
 
-                            .func_def => utils.todo(),
-                        }
+                            it_interpretator.inliner.gpa.free(file_ir);
+
+
+                            break :blk0 instructions_span;
+                        };
+
+                        _ = try it_interpretator.appendJob(.{
+                            .parent = job,
+                            .specific = .{ .compute = .{
+                                .index = instructions_span.start,
+                            } },
+                        });
+
+
+                        self.cached_file_index = it_interpretator.inliner.cached_files.items.len;
+                        try it_interpretator.inliner.cached_files.append(it_interpretator.inliner.gpa, .{
+                            .file_path = try it_interpretator.inliner.gpa.dupe(u8, self.file_path),
+                            .file_code = file_code,
+                            .type_index = undefined,
+                            .span = instructions_span,
+                        });
+
+                        try it_interpretator.inliner.instructions__source_locs.append(it_interpretator.inliner.gpa, .{
+                            .instructions = instructions_span,
+                            .file_index = self.cached_file_index,
+                        });
+
+                        self.state = .continuing_computing;
+                    },
+
+                    .continuing_computing => {
+                        it_interpretator.inliner.cached_files.items[self.cached_file_index].type_index = try job.values.getLast().toType();
+                        self.state = .returning;
+                    },
+
+                    .returning => {
+                        try job.parent.?.values.append(gpa, job.values.pop().?);
+                        it_interpretator.popJob();
                     },
                 }
-            },
+            }
+        };
+
+
+        pub fn step(self: *JobSpecific, job: *Job, it_interpretator: *InlineTimeInterpretator) !void {
+            switch (self.*) { inline else => |*d, tag| {
+                std.debug.print("{s}\n", .{ @tagName(tag) });
+                try d.step(job, it_interpretator);
+            } }
         }
+
+        pub fn deinit(self: JobSpecific, allocator: std.mem.Allocator) void {
+            switch (self) {
+                .start => {},
+
+                .compute => {},
+                .compute_ty => {},
+                .drop => {},
+
+                .get_member => |d| {
+                    allocator.free(d.member);
+                },
+                .get_static_value => {},
+
+                .ty_check_func_body => {},
+
+                .import => |d| {
+                    allocator.free(d.file_path);
+                },
+            }
+        }
+    };
+
+
+    pub fn deinit(self: *InlineTimeInterpretator) void {
+        for (self.jobs.items) |job| self.deinitJob(job);
+        self.jobs.deinit(self.inliner.gpa);
     }
 
-    fn putValueToParentJob(self: *InlineTimeInterpretator, parent: usize, value: ValueContainer) !void {
-        switch (self.jobs.items[parent].specific) {
-            .start => |*d| {
-                d.result = value;
-            },
+    pub fn step(self: *InlineTimeInterpretator) !void {
+        try self.jobs.getLast().step(self);
+    }
 
-            .compute => |*d| {
-                try d.values.append(self.inliner.gpa, value);
-            },
+
+
+    pub fn popJob(self: *InlineTimeInterpretator) void {
+        self.deinitJob(self.jobs.pop().?);
+    }
+
+    pub fn appendJob(self: *InlineTimeInterpretator, job: Job) !*Job {
+        try self.jobs.append(self.inliner.gpa, try utils.createAndCopy(Job, self.inliner.gpa, job));
+
+        return self.jobs.getLast();
+    }
+
+
+    pub fn deinitJob(self: InlineTimeInterpretator, job: *Job) void {
+        job.deinit(self.inliner.gpa);
+        self.inliner.gpa.destroy(job);
+    }
+
+
+    pub fn getDeclsParent(self: InlineTimeInterpretator, job: *Job) DeclsParent {
+        var curr_job: *Job = job.parent orelse return .none;
+
+        while (true) {
+            switch (curr_job.specific) {
+                .get_static_value => |d| {
+                    return .{ .ty = self.inliner.static_values.items[d.index].parent_ty };
+                },
+                .ty_check_func_body => |d| {
+                    return self.inliner.func_defs.items[d.func_index].parent;
+                },
+                .import => {
+                    return .none;
+                },
+                else => {}
+            }
+
+            if (curr_job.parent) |parent| curr_job = parent
+            else return .none;
         }
     }
 };
@@ -336,27 +1120,120 @@ pub const ValueContainer = struct {
     pub fn deinit(self: ValueContainer, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
     }
+    pub fn deinitFull(self: ValueContainer, allocator: std.mem.Allocator) void {
+        // TODO   deinitializing of self.data
+        allocator.free(self.data);
+    }
 
-    pub fn fromInt(comptime T: type, value: T, allocator: std.mem.Allocator) !ValueContainer {
-        const byte_count = comptime (std.math.ceilPowerOfTwo(usize, std.math.divCeil(usize, @typeInfo(T).int.bits, 8) catch unreachable) catch unreachable);
-        const data = try allocator.alloc(u8, byte_count);
-
-        std.mem.writeInt(T, @ptrCast(data), value, .native);
-
+    pub fn clone(self: ValueContainer, allocator: std.mem.Allocator) !ValueContainer {
         return .{
-            .data = data,
-            .ty = switch (@typeInfo(T).int.signedness) { .signed => 0, .unsigned => 65536 } + @as(u32, @typeInfo(T).int.bits),
+            .data = try allocator.dupe(u8, self.data),
+            .ty = self.ty,
         };
     }
 
+
+    pub fn fromInt(comptime T: type, value: T, allocator: std.mem.Allocator) !ValueContainer {
+        const byte_count = comptime @divExact(@as(usize, @typeInfo(T).int.bits), @as(usize, 8));
+        const data = try allocator.alloc(u8, byte_count);
+
+        std.mem.writeInt(T, data[0..byte_count], value, .native);
+
+        return .{
+            .data = data,
+            .ty = comptime TypePool.getStatic(.{ .@"int" = .fromZigIntType(T) }),
+        };
+    }
+
+    pub fn fromType(value: u32, allocator: std.mem.Allocator) !ValueContainer {
+        return (try ValueContainer.fromInt(u32, value, allocator)).withTy(comptime TypePool.getStatic(.@"type"),);
+    }
+
+    /// callee owns `value`
+    pub fn fromBigInt(value: std.math.big.int.Managed, allocator: std.mem.Allocator) !ValueContainer {
+        const data = try allocator.alloc(u8, @sizeOf(std.math.big.int.Managed));
+
+        @memcpy(
+            data,
+            @as(  *const [@sizeOf(std.math.big.int.Managed)]u8,  @ptrCast(&value)  ),
+        );
+
+        return .{
+            .data = data,
+            .ty = comptime TypePool.getStatic(.@"int_literal"),
+        };
+    }
+
+
     pub fn toInt(self: ValueContainer, comptime T: type) !T {
-        if (self.ty != switch (@typeInfo(T).int.signedness) { .signed => 0, .unsigned => 65536 } + @as(u32, @typeInfo(T).int.bits)) return error.MismatchedType;
+        if (self.ty != TypePool.getStatic(.{ .@"int" = .fromZigIntType(T) })) return error.MismatchedType;
 
         const byte_count = comptime (std.math.ceilPowerOfTwo(usize, std.math.divCeil(usize, @typeInfo(T).int.bits, 8) catch unreachable) catch unreachable);
 
         const result = std.mem.readInt(T, self.data[0..byte_count], .native);
 
         return result;
+    }
+    pub fn toIntDeinitFull(self: ValueContainer, comptime T: type, allocator: std.mem.Allocator) !T {
+        const result = try self.toInt(T);
+        self.deinitFull(allocator);
+
+        return result;
+    }
+
+    /// `self` owns the result
+    pub fn toBigInt(self: ValueContainer) !std.math.big.int.Managed {
+        if (self.ty != TypePool.getStatic(.@"int_literal")) {
+            // std.debug.print("expected type 'int_literal', found {}\n", .{ self.ty });
+            return error.MismatchedType;
+        }
+        var result: std.math.big.int.Managed = undefined;
+
+        @memcpy(
+            @as(  *[@sizeOf(std.math.big.int.Managed)]u8,  @ptrCast(&result)  ),
+            self.data,
+        );
+
+        return result;
+    }
+    pub fn toBigIntDeinitFull(self: ValueContainer, allocator: std.mem.Allocator) !std.math.big.int.Managed {
+        const result = (try self.toBigInt()).clone();
+        self.deinitFull(allocator);
+
+        return result;
+    }
+
+    pub fn toType(self: ValueContainer) !u32 {
+        if (self.ty != TypePool.getStatic(.@"type")) {
+            // std.debug.print("expected type 'type', found {}\n", .{ self.ty });
+            return error.MismatchedType;
+        }
+        return try self.withTy(comptime TypePool.getStatic(.{ .@"int" = .fromZigIntType(u32) })).toInt(u32);
+    }
+    pub fn toTypeDeinitFull(self: ValueContainer, allocator: std.mem.Allocator) !u32 {
+        const result = try self.toType();
+        self.deinitFull(allocator);
+
+        return result;
+    }
+
+
+    pub fn withTy(self: ValueContainer, ty: u32) ValueContainer {
+        return .{
+            .data = self.data,
+            .ty = ty,
+        };
+    }
+    pub fn typeOfDeinitFull(self: ValueContainer, allocator: std.mem.Allocator) u32 {
+        const result = self.ty;
+        self.deinitFull(allocator);
+
+        return result;
+    }
+
+
+    pub fn empty(allocator: std.mem.Allocator) !ValueContainer {
+        return .{ .data = try allocator.alloc(u8, 0), .ty = comptime TypePool.getStatic(.@"void") };
     }
 };
 
@@ -367,10 +1244,49 @@ pub fn inlineFile(cwd: std.Io.Dir, io: std.Io, gpa: std.mem.Allocator, file_path
         .cwd = cwd,
         .io = io,
         .gpa = gpa,
+
+        .instructions__label_infos = .init(gpa),
     };
     defer inliner.deinit();
 
-    const type_index = try inliner.import(file_path);
+    var it_interpretator: InlineTimeInterpretator = .{
+        .inliner = &inliner,
+    };
+    defer it_interpretator.deinit();
 
-    std.debug.print("{}\n", .{ type_index });
+    const job0 = try it_interpretator.appendJob(.{
+        .parent = null,
+        .specific = .{ .start = .{} },
+    });
+    const job1 = try it_interpretator.appendJob(.{
+        .parent = job0,
+        .specific = .{ .ty_check_func_body = .{} },
+    });
+    const job2 = try it_interpretator.appendJob(.{
+        .parent = job1,
+        .specific = .{ .get_member = .{
+            .member = try gpa.dupe(u8, "main"),
+        } },
+    });
+    _ = try it_interpretator.appendJob(.{
+        .parent = job2,
+        .specific = .{ .import = .{
+            .file_path = try gpa.dupe(u8, file_path),
+        } },
+    });
+
+    var step_count: usize = 0;
+
+    const main_value: ValueContainer = whl: while (true) {
+        try it_interpretator.step();
+        step_count += 1;
+
+        if (it_interpretator.jobs.getLast().specific == .start) {
+            break :whl it_interpretator.jobs.items[it_interpretator.jobs.items.len-1].values.pop().?;
+        }
+    };
+    defer main_value.deinitFull(gpa);
+
+    std.debug.print("{x} : {any}\n", .{ main_value.data, inliner.pool.get(main_value.ty) });
+    std.debug.print("step count: {}\n", .{ step_count });
 }
