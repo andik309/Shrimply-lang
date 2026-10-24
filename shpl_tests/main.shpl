@@ -23,6 +23,12 @@
 let @"main" = func() void {
     foo();
     foo();
+    foo();
+    foo();
+    foo();
+    foo();
+    foo();
+    foo();
 };
 
 let foo = func() void {};

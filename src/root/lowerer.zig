@@ -55,7 +55,7 @@ pub const Instruction = struct {
                 .int => |d| {
                     allocator.free(d);
                 },
-        
+
                 .decl => |d| {
                     allocator.free(d.name);
                 },
@@ -65,11 +65,11 @@ pub const Instruction = struct {
                 .call => |d| {
                     allocator.free(d.args);
                 },
-        
+
                 .block => |d| {
                     allocator.free(d.body);
                 },
-        
+
                 .struct_def => |d| {
                     for (d.fields) |field| {
                         allocator.free(field.name);
@@ -81,7 +81,7 @@ pub const Instruction = struct {
                     }
                     allocator.free(d.decls);
                 },
-        
+
                 .func_def => |d| {
                     for (d.params) |param| {
                         allocator.free(param.name);
