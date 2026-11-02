@@ -140,7 +140,6 @@ pub const DeclInfo = union(enum) {
     static_value: usize,
 };
 
-// maybe i'll switch to it later
 pub const TypeIndex = u30;
 pub const Type = packed struct(u32) {
     index: TypeIndex,
@@ -424,6 +423,12 @@ pub const Inliner = struct {
             func_def.deinit(self.gpa);
         }
         self.func_defs.deinit(self.gpa);
+
+        var it = self.inst_infos.iterator();
+        while (it.next()) |inst_info| {
+            inst_info.value_ptr.deinit(self.gpa);
+        }
+        self.inst_infos.deinit();
     }
 
     pub fn getFileIndexByInstructionIndex(self: *Inliner, instruction_index: usize) error{ InstructionIndexIsNotRegistered }!usize {
@@ -462,14 +467,17 @@ pub const InlineTimeInterpretator = struct {
 
         compute: Compute,
         compute_ty: ComputeType,
+        
         drop: Drop,
+        // (MAYBE_RENAME)
+        broadcast: Broadcast,
 
         get_member: GetMember,
         get_static_value: GetStaticValue, // long jump
 
         ty_check_func_body: TypeCheckFuncBody, // long jump
         ty_check_func_body_obj: TypeCheckFuncBodyObj,
-        
+
         remove_ref_opt: RemoveRefOpt,
 
         size_of: SizeOf,
@@ -608,7 +616,7 @@ pub const InlineTimeInterpretator = struct {
                             const result_index: u32 = @truncate(it_interpretator.inliner.func_defs.items.len);
                             try it_interpretator.inliner.func_defs.append(gpa, result);
 
-                            const result_ty_index: u30 = try it_interpretator.inliner.pool.put(try result.getTypeInfo(gpa), gpa);
+                            const result_ty_index: TypeIndex = try it_interpretator.inliner.pool.put(try result.getTypeInfo(gpa), gpa);
 
 
                             try job.values.append(gpa, (try ValueContainer.fromInt(u32, result_index, gpa)).withTy(.from_index(result_ty_index)));
@@ -806,10 +814,29 @@ pub const InlineTimeInterpretator = struct {
                 return null;
             }
         };
+        
         pub const Drop = struct {
             pub fn step(self: *Drop, job: *Job, it_interpretator: *InlineTimeInterpretator) !?ValueContainer {
                 _ = self;
                 _ = job;
+
+                it_interpretator.popJob();
+
+                return null;
+            }
+        };
+        pub const Broadcast = struct {
+            extra_parents: []const *Job,
+
+            pub fn step(self: *Broadcast, job: *Job, it_interpretator: *InlineTimeInterpretator) !?ValueContainer {
+                const gpa = it_interpretator.inliner.gpa;
+
+                const value = job.values.pop().?;
+                
+                try job.parent.?.values.append(gpa, try value.clone(gpa));
+                for (self.extra_parents) |extra_parent| try extra_parent.values.append(gpa, try value.clone(gpa));
+
+                value.deinitFull(gpa);
 
                 it_interpretator.popJob();
 
@@ -946,7 +973,7 @@ pub const InlineTimeInterpretator = struct {
 
             pub const State = union(enum) {
                 start,
-                checking_if_not_checked,
+                checking,
                 returning_result,
             };
 
@@ -954,26 +981,19 @@ pub const InlineTimeInterpretator = struct {
                 _ = &job;
                 _ = &it_interpretator;
 
-                const gpa = it_interpretator.inliner.gpa;
-
                 switch (self.state) {
                     .start => {
-                        self.state = .checking_if_not_checked;
-                        if (it_interpretator.inliner.func_defs.items[self.func_index].checked) {}
+                        if (it_interpretator.inliner.func_defs.items[self.func_index].checked) self.state = .returning_result
+                        else self.state = .checking;
                     },
-                    .checking_if_not_checked => {
-                        const value = job.values.getLast();
-                        std.debug.assert(it_interpretator.inliner.pool.get(value.ty.index) == .@"func");
-
-                        self.func_index = try value.withTy(.from_index(comptime TypePool.getStatic(.{ .@"int" = .fromZigIntType(u32) }))).toInt(u32); // TODO type modifiers inheritance
-
-                        const job1 = try it_interpretator.appendJob(.{
+                    .checking => {
+                        const job0 = try it_interpretator.appendJob(.{
                             .parent = job,
                             .specific = .{ .drop = .{} },
                         });
 
                         _ = try it_interpretator.appendJob(.{
-                            .parent = job1,
+                            .parent = job0,
                             .specific = .{ .compute_ty = .{
                                 .index = it_interpretator.inliner.func_defs.items[self.func_index].body.start,
                             } },
@@ -984,7 +1004,6 @@ pub const InlineTimeInterpretator = struct {
                         self.state = .returning_result;
                     },
                     .returning_result => {
-                        try job.parent.?.values.append(gpa, job.values.pop().?);
                         it_interpretator.popJob();
                     },
                 }
@@ -1002,32 +1021,34 @@ pub const InlineTimeInterpretator = struct {
                 returning_result,
             };
 
-            pub fn step(self: *TypeCheckFuncBody, job: *Job, it_interpretator: *InlineTimeInterpretator) !?ValueContainer {
+            pub fn step(self: *TypeCheckFuncBodyObj, job: *Job, it_interpretator: *InlineTimeInterpretator) !?ValueContainer {
                 _ = &job;
                 _ = &it_interpretator;
+
+                const gpa = it_interpretator.inliner.gpa;
 
                 switch (self.state) {
                     .start => {
                         const value = job.values.getLast();
                         std.debug.assert(it_interpretator.inliner.pool.get(value.ty.index) == .@"func");
-                        
+
                         self.state = .stage0;
                     },
                     .stage0 => {
                         self.state = .stage1;
 
-                        it_interpretator.appendJob(.{ 
-                            .parent = job,
-                            .specific = .{ .remove_ref_opt = .{} },
-                        });
+                        // it_interpretator.appendJob(.{
+                        //     .parent = job,
+                        //     .specific = .{ .remove_ref_opt = .{} },
+                        // });
                     },
                     .stage1 => {
-                        const value = job.values.pop();
-                        std.debug.assert(value.ty.modifier == .none);
+                        const value = job.values.pop().?;
+                        std.debug.assert(value.ty.modifier == .none); // TODO
 
-                        const func_index = try value.withTy(.from_index(comptime TypePool.getStatic(.{ .@"int" = .fromZigIntType(u32) }))).toInt(u32); // TODO type modifiers inheritance
+                        const func_index = try value.withTy(.from_index(comptime TypePool.getStatic(.{ .@"int" = .fromZigIntType(u32) }))).toIntDeinitFull(u32, gpa);
 
-                        it_interpretator.appendJob(.{ 
+                        _ = try it_interpretator.appendJob(.{
                             .parent = job,
                             .specific = .{ .ty_check_func_body = .{
                                 .func_index = func_index,
@@ -1051,6 +1072,7 @@ pub const InlineTimeInterpretator = struct {
             pub const State = enum {
                 start,
                 stage0,
+                stage1,
                 returning_result,
             };
 
@@ -1062,16 +1084,13 @@ pub const InlineTimeInterpretator = struct {
 
                 switch (self.state) {
                     .start => {
-                        if (job.values.getLast().ty.modifier != .none) {
-                            self.state = .returning_result;
-                        } else {
-                            self.state = .stage0;
-                        }
+                        if (job.values.getLast().ty.modifier == .none) self.state = .returning_result
+                        else self.state = .stage0;
                     },
                     .stage0 => {
                         self.state = .returning_result;
                         const ty_index = job.values.getLast().ty.index;
-                        
+
                         _ = try it_interpretator.appendJob(.{
                             .parent = job,
                             .specific = .{ .size_of = .{
@@ -1080,12 +1099,12 @@ pub const InlineTimeInterpretator = struct {
                         });
                     },
                     .stage1 => {
-                        const len = job.values.pop().?.toBigIntDeinitFull(gpa);
-                        const ty_index = job.values.getLast().ty.index;
+                        const size_of = try (try job.values.pop().?.toBigIntDeinitFull(gpa)).toInt(usize); // TODO: Errors
+                        const ty_index = job.values.getLast().typeOfDeinitFull(gpa).index;
                         const ptr: [*]u8 = @ptrFromInt(try job.values.pop().?.withTy(.from_index(comptime TypePool.getStatic(.{ .@"int" = .fromZigIntType(usize) }))).toIntDeinitFull(usize, gpa));
 
                         const result = ValueContainer{
-                            .data = ptr[0..len],
+                            .data = ptr[0..size_of],
                             .ty = .from_index(ty_index),
                         };
 
@@ -1101,7 +1120,7 @@ pub const InlineTimeInterpretator = struct {
             }
         };
 
-        pub const SizeOf = struct { // TODO SizeOf
+        pub const SizeOf = struct { // TODO
             ty_index: TypeIndex,
 
             pub fn step(self: *SizeOf, job: *Job, it_interpretator: *InlineTimeInterpretator) !?ValueContainer {
@@ -1111,17 +1130,21 @@ pub const InlineTimeInterpretator = struct {
 
                 const size = switch (type_info) {
                     .@"int" => unreachable,
-                
+
                     .@"int_literal" => unreachable,
                     .@"type" => unreachable,
-                
+
                     .@"void" => unreachable,
                     .@"noreturn" => unreachable,
-                
+
                     .@"struct" => unreachable,
-                
+
                     .@"func" => unreachable,
                 };
+
+                _ = &gpa;
+                _ = &job;
+                _ = &size;
 
                 // try job.parent.?.values.append(gpa, .fromBigInt(value: Managed, allocator: Allocator));
             }
@@ -1246,7 +1269,7 @@ pub const InlineTimeInterpretator = struct {
         };
 
         // pub const ResolveFieldTypes = struct {
-        //     
+        //
         // };
 
 
@@ -1262,7 +1285,11 @@ pub const InlineTimeInterpretator = struct {
 
                 .compute => {},
                 .compute_ty => {},
+                
                 .drop => {},
+                .broadcast => |d| {
+                    allocator.free(d.extra_parents);
+                },
 
                 .get_member => |d| {
                     allocator.free(d.member);
@@ -1270,6 +1297,11 @@ pub const InlineTimeInterpretator = struct {
                 .get_static_value => {},
 
                 .ty_check_func_body => {},
+                .ty_check_func_body_obj => {},
+
+                .remove_ref_opt => unreachable,
+
+                .size_of => unreachable,
 
                 .import => |d| {
                     allocator.free(d.file_path);
@@ -1405,7 +1437,7 @@ pub const ValueContainer = struct {
 
     /// `self` owns the result
     pub fn toBigInt(self: ValueContainer) !std.math.big.int.Managed {
-        if (self.ty != comptime TypePool.getStatic(.@"int_literal")) {
+        if (self.ty != Type.from_index(comptime TypePool.getStatic(.@"int_literal"))) {
             // std.debug.print("expected type 'int_literal', found {}\n", .{ self.ty });
             return error.MismatchedType;
         }
@@ -1487,17 +1519,23 @@ pub fn inlineFile(cwd: std.Io.Dir, io: std.Io, gpa: std.mem.Allocator, file_path
         .specific = .{ .start = .{} },
     });
     const job1 = try it_interpretator.appendJob(.{
-        .parent = job0,
-        .specific = .{ .ty_check_func_body = .{} },
+        .parent = null,
+        .specific = .{ .ty_check_func_body_obj = .{} },
     });
     const job2 = try it_interpretator.appendJob(.{
-        .parent = job1,
+        .parent = job0,
+        .specific = .{ .broadcast = .{
+            .extra_parents = try gpa.dupe(*InlineTimeInterpretator.Job, &.{ job1 }),
+        } },
+    });
+    const job3 = try it_interpretator.appendJob(.{
+        .parent = job2,
         .specific = .{ .get_member = .{
             .member = try gpa.dupe(u8, "main"),
         } },
     });
     _ = try it_interpretator.appendJob(.{
-        .parent = job2,
+        .parent = job3,
         .specific = .{ .import = .{
             .file_path = try gpa.dupe(u8, file_path),
         } },
